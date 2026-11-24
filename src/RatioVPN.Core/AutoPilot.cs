@@ -50,6 +50,16 @@ public sealed class AutoPilot
     private readonly Dictionary<string, (string Pattern, Regex? Regex)> _regex = new();
     private readonly Dictionary<int, (string? Tunnel, DateTime Since)> _since = new();
     private List<ManagedInstance> _instances = new();
+    /// <summary>Ausfallzeitpunkte je Verbindung (nur echte Einzelausfälle, nicht während „Internet weg“).</summary>
+    private readonly Dictionary<string, List<DateTime>> _failures = new();
+    /// <summary>Verbindungen, die während eines Internet-Ausfalls ausfielen: ihr „wieder da“ wird nicht einzeln gemeldet.</summary>
+    private readonly HashSet<string> _outageTunnels = new();
+
+    /// <summary>Anteil ausgefallener Verbindungen, ab dem das eigene Internet als weg gilt.</summary>
+    public const double InternetDownShare = 0.75;
+
+    /// <summary>Fast alle Verbindungen antworten nicht → eher das eigene Internet weg als die Server.</summary>
+    public bool InternetDown { get; private set; }
 
     public AutoPilot(VpnController controller, Func<DateTime>? clock = null)
     {
@@ -133,12 +143,34 @@ public sealed class AutoPilot
         return t != null && _c.IsEnabled(tunnelId) && t.State == TunnelState.Connected && !t.IsUnresponsive(FailAfter);
     }
 
+    /// <summary>Bekannte Ausfälle (z. B. aus der Statistik) übernehmen, damit die Reihenfolge der Reserven stimmt.</summary>
+    public void SeedFailures(IEnumerable<(string TunnelId, DateTime Time)> failures)
+    {
+        foreach (var (id, time) in failures) AddFailure(id, time);
+    }
+
+    public int FailuresLast24h(string tunnelId)
+    {
+        var cut = _clock() - TimeSpan.FromHours(24);
+        return _failures.TryGetValue(tunnelId, out var list) ? list.Count(t => t >= cut) : 0;
+    }
+
+    /// <summary>Vergabestufe: 0 = keine Ausfälle, 1 = ein bis zwei, 2 = drei oder mehr (letzte 24 h).</summary>
+    private int ReliabilityTier(string tunnelId) => FailuresLast24h(tunnelId) switch { 0 => 0, <= 2 => 1, _ => 2 };
+
+    private void AddFailure(string tunnelId, DateTime time)
+    {
+        if (!_failures.TryGetValue(tunnelId, out var list)) _failures[tunnelId] = list = new();
+        list.Add(time);
+    }
+
     /// <summary>Nur Fenster (ohne Prozessliste).</summary>
     public void Step(IReadOnlyList<WindowInfo> windows) => Step(new SystemSnapshot(windows, Array.Empty<ProcessInfo>()));
 
     /// <summary>Ein Durchlauf (alle 2 s aus der Oberfläche aufgerufen).</summary>
     public void Step(SystemSnapshot snapshot)
     {
+        UpdateInternetState();
         TrackTunnelHealth();
         if (!S.Enabled)
         {
@@ -164,6 +196,14 @@ public sealed class AutoPilot
         }
 
         var units = BuildUnits(instances);
+
+        if (InternetDown)
+        {
+            HoldDuringOutage(units);
+            foreach (var pid in _lastNotice.Keys.Where(p => !managedPids.Contains(p)).ToList()) _lastNotice.Remove(pid);
+            UpdateInstances(instances);
+            return;
+        }
 
         // 1. Einheiten mit eigener, funktionierender Verbindung behalten sie.
         var pending = new List<Unit>();
@@ -198,7 +238,8 @@ public sealed class AutoPilot
 
             var free = _c.Tunnels
                 .Where(t => !used.Contains(t.Id) && IsReady(t.Id))
-                .OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(t => ReliabilityTier(t.Id))
+                .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
 
             if (free != null)
@@ -309,23 +350,68 @@ public sealed class AutoPilot
         _instances = list;
     }
 
+    /// <summary>Erkennt „Internet weg“ (≥ 75 % der laufenden Verbindungen ausgefallen, mindestens 2) und das Ende.</summary>
+    private void UpdateInternetState()
+    {
+        var running = _c.Tunnels.Where(t => _c.IsEnabled(t.Id) && t.IsRunning).ToList();
+        var failed = running.Where(t => t.IsUnresponsive(FailAfter)).ToList();
+        bool down = running.Count >= 2 && failed.Count >= running.Count * InternetDownShare;
+        if (down && !InternetDown)
+        {
+            InternetDown = true;
+            Raise("Internet weg – keine Verbindung antwortet mehr. Es wird nichts umgestellt, bis es wieder da ist.",
+                true, AutoPilotEventKind.InternetDown);
+        }
+        else if (!down && InternetDown)
+        {
+            InternetDown = false;
+            Raise("Internet wieder da", true, AutoPilotEventKind.InternetUp);
+        }
+        if (InternetDown) foreach (var t in failed) _outageTunnels.Add(t.Id);
+    }
+
+    /// <summary>Während „Internet weg“: nichts umstellen; wer eine Verbindung hat, behält sie, Neue werden blockiert.</summary>
+    private void HoldDuringOutage(List<Unit> units)
+    {
+        foreach (var m in units.SelectMany(u => u.Members))
+        {
+            var mine = _c.WindowRuleFor(m.Pid);
+            if (IsTunnelId(mine) && _c.GetTunnel(mine!) != null)
+            {
+                Remember(m.Pid, "outage:" + mine);
+                continue;
+            }
+            if (mine != Block) _c.AssignWindow(m.Pid, m.ExePath, m.Title, Block);
+            Remember(m.Pid, "outage-blocked");
+        }
+    }
+
     private void TrackTunnelHealth()
     {
+        var cut = _clock() - TimeSpan.FromHours(24);
+        foreach (var list in _failures.Values) list.RemoveAll(t => t < cut);
+
         foreach (var t in _c.Tunnels)
         {
             if (!_c.IsEnabled(t.Id) || !t.IsRunning)
             {
                 _tunnelFailed.Remove(t.Id);
+                _outageTunnels.Remove(t.Id);
                 continue;
             }
             bool failed = t.IsUnresponsive(FailAfter);
             bool known = _tunnelFailed.TryGetValue(t.Id, out var wasFailed);
-            if (known && failed && !wasFailed)
+            bool silent = InternetDown || _outageTunnels.Contains(t.Id); // Ausfall des eigenen Internets: nicht einzeln melden
+            if (known && failed && !wasFailed && !silent)
+            {
                 Raise($"Verbindung {t.Name} antwortet nicht mehr", false, AutoPilotEventKind.TunnelDown, t.Id);
-            if (known && !failed && wasFailed && t.State == TunnelState.Connected)
+                AddFailure(t.Id, _clock());
+            }
+            if (known && !failed && wasFailed && t.State == TunnelState.Connected && !silent)
                 Raise($"Verbindung {t.Name} ist wieder da (jetzt Reserve)", false, AutoPilotEventKind.TunnelUp, t.Id);
             if (failed || t.State == TunnelState.Connected)
                 _tunnelFailed[t.Id] = failed;
+            if (!failed && t.State == TunnelState.Connected && !InternetDown) _outageTunnels.Remove(t.Id);
         }
     }
 

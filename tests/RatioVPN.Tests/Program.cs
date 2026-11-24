@@ -645,6 +645,67 @@ Console.WriteLine("Automatik-Regeln für beliebige Programme (Prozess-Erkennung,
     try { Directory.Delete(dir, true); } catch { }
 }
 
+// ---------------------------------------------------------------- Internet-Ausfall + Zuverlässigkeit
+Console.WriteLine("Automatik: Internet-Ausfall und Zuverlässigkeit:");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "settings.json")), new PlainProtector(), new FakeLookup(), null);
+    c.Start();
+    var all = new[] { "A", "B", "C", "D" }.Select(n => c.ImportConfig(n + ".conf", TestConf())).ToArray();
+    void Ready(WgTunnel t) => t.ForceStateForTest(TunnelState.Connected);
+    void Fail(WgTunnel t) => t.ForceStateForTest(TunnelState.Error);
+    foreach (var t in all) { t.Start(); Ready(t); }
+    using var s1 = StartSleeper();
+    int me = Environment.ProcessId;
+    var now = new DateTime(2026, 11, 24, 12, 0, 0);
+    var ap = new AutoPilot(c, () => now);
+    var events = new List<AutoPilotEvent>();
+    ap.EventRaised += events.Add;
+    var windows = new[] { new WindowInfo(me, @"C:\Java\javaw.exe", "Minecraft* 26.2"), new WindowInfo(s1.Id, @"C:\Java\javaw.exe", "Minecraft* 26.2 | NRC 26.2") };
+    ap.Step(windows);
+    string? r1 = c.WindowRuleFor(me), r2 = c.WindowRuleFor(s1.Id);
+
+    Fail(c.GetTunnel(r1!)!);
+    ap.Step(windows);
+    Check("Einzelausfall ist kein Internet-Ausfall",
+        !ap.InternetDown && c.WindowRuleFor(me) != r1 && c.WindowRuleFor(me) != RoutingEngine.BlockRule
+        && events.All(e => e.Kind != AutoPilotEventKind.InternetDown));
+    foreach (var t in all) Ready(t);
+    ap.Step(windows);
+    string? k1 = c.WindowRuleFor(me), k2 = c.WindowRuleFor(s1.Id);
+
+    events.Clear();
+    foreach (var t in all) Fail(t);
+    for (int i = 0; i < 3; i++) ap.Step(windows);
+    Check("Alle Verbindungen weg → eine Meldung Internet weg, keine Wechsel",
+        ap.InternetDown && events.Count(e => e.Kind == AutoPilotEventKind.InternetDown) == 1
+        && events.Count(e => e.Kind is AutoPilotEventKind.TunnelDown or AutoPilotEventKind.Switched or AutoPilotEventKind.Waiting) == 0
+        && c.WindowRuleFor(me) == k1 && c.WindowRuleFor(s1.Id) == k2,
+        string.Join(" | ", events.Select(e => e.Kind)));
+    Check("Internet-Meldung ist wichtig", events.First(e => e.Kind == AutoPilotEventKind.InternetDown).Important);
+
+    events.Clear();
+    foreach (var t in all) Ready(t);
+    for (int i = 0; i < 2; i++) ap.Step(windows);
+    Check("Internet wieder da → eine Meldung, keine Wieder-da-Flut",
+        !ap.InternetDown && events.Count(e => e.Kind == AutoPilotEventKind.InternetUp) == 1
+        && events.Count(e => e.Kind == AutoPilotEventKind.TunnelUp) == 0,
+        string.Join(" | ", events.Select(e => e.Kind)));
+
+    // Zuverlässigkeit: frische Automatik, A fiel in den letzten 24 h dreimal aus
+    var ap2 = new AutoPilot(c, () => now);
+    ap2.SeedFailures(Enumerable.Repeat((all[0].Id, now.AddHours(-1)), 3).Append((all[0].Id, now.AddDays(-3))));
+    c.AssignWindow(me, "", "", null);
+    c.AssignWindow(s1.Id, "", "", null);
+    ap2.Step(new[] { windows[0] });
+    Check("Ausfälle der letzten 24 h werden gezählt", ap2.FailuresLast24h(all[0].Id) == 3 && ap2.FailuresLast24h(all[1].Id) == 0);
+    Check("Unzuverlässige Verbindung wird als Reserve zuletzt vergeben", c.WindowRuleFor(me) == all[1].Id, c.WindowRuleFor(me));
+
+    foreach (var t in all) t.Stop();
+    try { s1.Kill(); } catch { }
+    try { Directory.Delete(dir, true); } catch { }
+}
+
 static Process StartSleeper()
 {
     var exe = Environment.ProcessPath!;
