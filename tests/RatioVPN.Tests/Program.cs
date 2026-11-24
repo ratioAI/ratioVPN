@@ -488,6 +488,46 @@ Console.WriteLine("Automatik-Einstellungen und Discord:");
         && !DiscordNotifier.IsValidUrl("https://discord.com/channels/1/2") && !DiscordNotifier.IsValidUrl("kein link"));
 }
 
+// ---------------------------------------------------------------- Automatik-Regeln: Modell + Migration
+Console.WriteLine("Automatik-Regeln (Modell und Übernahme der alten Einstellung):");
+{
+    var s1 = new AppSettings();
+    s1.AutoPilot.TitlePattern = "Minecraft X";
+    bool migrated = AutoRuleMigration.Apply(s1);
+    var r = s1.AutoRules?.FirstOrDefault();
+    Check("Migration legt Minecraft-Regel aus altem Muster an",
+        migrated && s1.AutoRules!.Count == 1 && r!.Name == "Minecraft 26.2" && r.ExeNames == "javaw.exe, java.exe"
+        && r.TitlePattern == "Minecraft X" && r.Mode == AutoRuleMode.Separate && r.WatchTraffic && r.Enabled && r.Id.Length == 8);
+    Check("Migration läuft nur einmal", !AutoRuleMigration.Apply(s1) && s1.AutoRules!.Count == 1);
+    var s2 = new AppSettings();
+    s2.AutoPilot.Enabled = false;
+    AutoRuleMigration.Apply(s2);
+    Check("Hauptschalter aus bleibt aus, Regel ist an", !s2.AutoPilot.Enabled && s2.AutoRules![0].Enabled);
+    var s3 = new AppSettings { AutoRules = new() };
+    Check("Leere Regelliste bleibt leer (Nutzer hat alle gelöscht)", !AutoRuleMigration.Apply(s3) && s3.AutoRules.Count == 0);
+    Check("Programmliste einer Regel wird bereinigt",
+        new AutoRuleEntry { ExeNames = " JavaW.exe , java.exe;; " }.ExeList().SequenceEqual(new[] { "javaw.exe", "java.exe" }));
+
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var store = new SettingsStore(Path.Combine(dir, "settings.json"));
+    var s4 = new AppSettings { AutoRules = new() { new AutoRuleEntry { Name = "Bots", ExeNames = "bot.exe", Mode = AutoRuleMode.Shared } } };
+    store.Save(s4);
+    var json = File.ReadAllText(store.FilePath);
+    var back4 = store.Load();
+    Check("Regeln werden mit Modus als Text gespeichert und gelesen",
+        json.Contains("\"Mode\": \"Shared\"") && back4.AutoRules![0].Mode == AutoRuleMode.Shared && back4.AutoRules[0].ExeNames == "bot.exe");
+
+    File.WriteAllText(store.FilePath,
+        "{\"KillSwitch\":true,\"Tunnels\":[],\"Rules\":[],\"WindowRules\":[{\"Pid\":1,\"StartTimeTicks\":1,\"ExePath\":\"C:\\x.exe\",\"Title\":\"t\",\"TunnelId\":\"deadbeef\"}],"
+        + "\"AutoPilot\":{\"Enabled\":true,\"TitlePattern\":\"Minecraft\\*?\\s*26\\.2(?!\\d)\",\"DiscordWebhookUrl\":\"\",\"FailAfterSeconds\":25}}");
+    var c5 = new VpnController(store, new PlainProtector(), new FakeLookup(), null);
+    bool loadOk = true;
+    try { c5.Start(); } catch { loadOk = false; }
+    Check("Alte Datei mit Fensterregel auf gelöschte Verbindung lädt ohne Fehler und wird übernommen",
+        loadOk && c5.Settings.AutoRules?.Count == 1 && File.ReadAllText(store.FilePath).Contains("\"AutoRules\""));
+    try { Directory.Delete(dir, true); } catch { }
+}
+
 // ---------------------------------------------------------------- Automatik
 Console.WriteLine("Automatik (jedes Fenster eine eigene Verbindung, Wechsel bei Ausfall):");
 {

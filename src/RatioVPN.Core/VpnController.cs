@@ -61,6 +61,7 @@ public sealed class VpnController : IDisposable
     {
         var problems = new List<string>();
         Settings = _store.Load();
+        if (AutoRuleMigration.Apply(Settings)) Save();
         Engine.KillSwitch = Settings.KillSwitch;
 
         foreach (var entry in Settings.Tunnels.ToList())

@@ -11,6 +11,9 @@ public sealed class TunnelEntry
     /// <summary>Verschlüsselter (DPAPI) Inhalt der .conf-Datei, Base64.</summary>
     public string ProtectedConfig { get; set; } = "";
     public bool Enabled { get; set; } = true;
+    /// <summary>Zuletzt geprüfte öffentliche IP über diese Verbindung ("" = unbekannt).</summary>
+    public string LastPublicIp { get; set; } = "";
+    public DateTime? LastPublicIpAt { get; set; }
 }
 
 public sealed class RuleEntry
@@ -46,6 +49,9 @@ public sealed class AutoPilotSettings
 public sealed class AppSettings
 {
     public AutoPilotSettings AutoPilot { get; set; } = new();
+    /// <summary>Automatik-Regeln. null = noch nie angelegt (dann wird die alte Minecraft-Einstellung übernommen).</summary>
+    public List<AutoRuleEntry>? AutoRules { get; set; }
+    public UiSettings Ui { get; set; } = new();
     public List<WindowRuleEntry> WindowRules { get; set; } = new();
     public List<TunnelEntry> Tunnels { get; set; } = new();
     public List<RuleEntry> Rules { get; set; } = new();
