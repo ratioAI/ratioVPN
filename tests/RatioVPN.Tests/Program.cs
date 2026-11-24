@@ -331,6 +331,67 @@ Console.WriteLine("Blockierte Fenster (Regel \"!\"):");
     engine.Dispose();
 }
 
+// ---------------------------------------------------------------- Verkehr pro Prozess
+Console.WriteLine("Verkehr pro Prozess und Eingang ohne Kopie:");
+{
+    var lookup = new FakeLookup();
+    var inj = new FakeInjector();
+    var engine = new RoutingEngine(lookup, inj);
+    var t = new WgTunnel("de", "DE", WgConfig.Parse(TestConf()));
+    engine.AddTunnel(t);
+    const string game = @"C:\Games\javaw.exe";
+    lookup.Exe[5001] = game;
+    lookup.Ports[(IpProto.Tcp, 50001)] = 5001;
+    engine.SetRules(new[] { new KeyValuePair<string, string>(game, "de") });
+    uint lanIp = Ip("192.168.1.50"), server = Ip("5.6.7.8");
+    engine.HandleOutbound(BuildTcp(lanIp, server, 50001, 25565, 1, 0, TcpFlags.Syn, Array.Empty<byte>()), 7, 3);
+    engine.HandleOutbound(BuildTcp(lanIp, server, 50001, 25565, 2, 0, TcpFlags.Ack, new byte[100]), 7, 3);
+    var reply = BuildTcp(server, Ip("10.2.0.2"), 25565, 50001, 1, 3, TcpFlags.Ack, new byte[10]);
+    var rxBuf = new byte[65536];
+    reply.CopyTo(rxBuf, 0);
+    t.RaisePacketReceivedForTest(rxBuf, reply.Length);
+    bool counted = engine.TryGetTraffic(5001, out var traffic);
+    Check("Getunnelte Pakete werden pro Prozess gezählt",
+        counted && traffic.PacketsOut == 2 && traffic.PacketsIn == 1 && traffic.BytesOut > 0 && traffic.BytesIn == reply.Length,
+        $"{traffic}");
+    Check("Unbekannter Prozess hat keinen Verkehr", !engine.TryGetTraffic(4711, out _));
+    bool injected = inj.Packets.TryTake(out var back, 1000);
+    Check("Antwortpaket wird ohne Kopie zurückübersetzt",
+        injected && ReferenceEquals(inj.LastRaw, rxBuf) && BinaryPrimitives.ReadUInt32BigEndian(back.Packet.AsSpan(16)) == lanIp
+        && IpPacket.VerifyChecksumsV4(back.Packet) && back.IfIdx == 7 && back.SubIfIdx == 3);
+    t.Stop();
+    engine.Dispose();
+}
+
+// ---------------------------------------------------------------- Umleitung nur bei Bedarf
+Console.WriteLine("Paketumleitung nur, wenn Regeln existieren:");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var cap = new FakeCapture();
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "settings.json")), new PlainProtector(), new FakeLookup(), cap);
+    c.Start();
+    Check("Beim Start wird die Umleitung einmal geprüft und ohne Regeln wieder geschlossen", cap.Starts == 1 && !cap.IsRunning);
+    var t = c.ImportConfig("A.conf", TestConf());
+    c.AssignWindow(Environment.ProcessId, @"C:\Java\javaw.exe", "Minecraft* 26.2", t.Id);
+    Check("Erste Fensterregel schaltet die Umleitung ein, bevor AssignWindow zurückkehrt", cap.IsRunning);
+    c.AssignWindow(Environment.ProcessId, @"C:\Java\javaw.exe", "Minecraft* 26.2", RoutingEngine.DirectRule);
+    Check("Nur „ohne VPN“-Regeln → Umleitung aus", !cap.IsRunning);
+    c.AssignProgram(@"C:\Toolsot.exe", "Bot", t.Id);
+    Check("Programmregel schaltet die Umleitung ein", cap.IsRunning);
+    c.AssignProgram(@"C:\Toolsot.exe", "Bot", null);
+    c.AssignWindow(Environment.ProcessId, @"C:\Java\javaw.exe", "Minecraft* 26.2", null);
+    Check("Letzte Regel entfernt → Umleitung aus", !cap.IsRunning);
+    cap.FailNextStart = true;
+    bool threw = false;
+    try { c.AssignProgram(@"C:\Toolsot.exe", "Bot", t.Id); } catch { threw = true; }
+    Check("Öffnen scheitert beim Umschalten → CaptureError gesetzt, kein Absturz", !threw && c.CaptureError != null && !cap.IsRunning, c.CaptureError);
+    c.AssignProgram(@"C:\Toolsot.exe", "Bot", null);
+    c.AssignProgram(@"C:\Toolsot.exe", "Bot", t.Id);
+    Check("Nächster Versuch klappt → Fehler verschwindet", cap.IsRunning && c.CaptureError == null);
+    t.Stop();
+    try { Directory.Delete(dir, true); } catch { }
+}
+
 // ---------------------------------------------------------------- Ausfall-Erkennung
 Console.WriteLine("Ausfall-Erkennung einer Verbindung:");
 {
@@ -563,7 +624,12 @@ sealed class FakeLookup : IProcessLookup
 sealed class FakeInjector : IPacketInjector
 {
     public readonly BlockingCollection<(byte[] Packet, uint IfIdx, uint SubIfIdx)> Packets = new();
-    public void InjectInbound(byte[] packet, int length, uint ifIdx, uint subIfIdx) => Packets.Add((packet[..length], ifIdx, subIfIdx));
+    public byte[]? LastRaw;
+    public void InjectInbound(byte[] packet, int length, uint ifIdx, uint subIfIdx)
+    {
+        LastRaw = packet;
+        Packets.Add((packet[..length], ifIdx, subIfIdx));
+    }
 
     public (byte[] Packet, uint IfIdx, uint SubIfIdx)? Wait(Func<byte[], bool> match, int ms)
     {
@@ -574,4 +640,19 @@ sealed class FakeInjector : IPacketInjector
         }
         return null;
     }
+}
+
+sealed class FakeCapture : IPacketCapture
+{
+    public int Starts, Stops;
+    public bool FailNextStart;
+    public bool IsRunning { get; private set; }
+    public void Start(RoutingEngine engine, int workerCount = 0)
+    {
+        Starts++;
+        if (FailNextStart) { FailNextStart = false; throw new System.ComponentModel.Win32Exception(5, "Zugriff verweigert"); }
+        IsRunning = true;
+    }
+    public void Stop() { Stops++; IsRunning = false; }
+    public void InjectInbound(byte[] packet, int length, uint ifIdx, uint subIfIdx) { }
 }

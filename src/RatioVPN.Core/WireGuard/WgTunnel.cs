@@ -29,6 +29,8 @@ public sealed class WgTunnel : IDisposable
     public long RxBytes => Interlocked.Read(ref _rx);
     public long TxBytes => Interlocked.Read(ref _tx);
     public bool IsRunning => _socket != null;
+    /// <summary>Tunnel-Adresse als Zahl (Netzwerk-Reihenfolge wie im Paket), einmal berechnet statt pro Paket.</summary>
+    public uint AddressV4Raw { get; }
 
     private long _rx, _tx;
     private readonly NoiseInitiator _noise;
@@ -60,6 +62,7 @@ public sealed class WgTunnel : IDisposable
         Name = name;
         Config = config;
         _noise = new NoiseInitiator(config.PrivateKey, config.PeerPublicKey, config.PresharedKey);
+        AddressV4Raw = config.AddressV4 != null ? Net.IpPacket.ParseV4(config.AddressV4) : 0;
         // Ohne Keepalive würde der Status nach Leerlauf ungenau; 25 s ist der übliche Wert.
         _keepalive = config.PersistentKeepalive > 0 ? config.PersistentKeepalive : 25;
     }

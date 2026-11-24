@@ -10,6 +10,7 @@ public interface IPacketCapture : IPacketInjector
 {
     void Start(RoutingEngine engine, int workerCount = 0);
     void Stop();
+    bool IsRunning { get; }
 }
 
 /// <summary>
@@ -25,6 +26,11 @@ public sealed class VpnController : IDisposable
     private readonly Dictionary<string, string> _tempRules = new(StringComparer.OrdinalIgnoreCase);
 
     public AppSettings Settings { get; private set; } = new();
+
+    /// <summary>Fehler beim Einschalten der Paketumleitung (z. B. Treiber blockiert), sonst null.</summary>
+    public string? CaptureError { get; private set; }
+    private readonly object _captureLock = new();
+    private bool _captureUsable;
     public RoutingEngine Engine { get; }
 
     /// <summary>Etwas hat sich geändert (Tunnelstatus, Regeln …). Kann aus beliebigem Thread kommen.</summary>
@@ -70,8 +76,13 @@ public sealed class VpnController : IDisposable
             }
         }
         PruneWindowRules(save: false);
-        ApplyRules();
-        _capture?.Start(Engine);
+        // Einmal öffnen, damit Treiberprobleme sofort beim Start auffallen (Fehler gehen an den Aufrufer).
+        if (_capture != null)
+        {
+            _capture.Start(Engine);
+            _captureUsable = true;
+        }
+        ApplyRules(); // schließt die Umleitung wieder, wenn noch keine Regel existiert
 
         foreach (var id in Settings.Rules.Select(r => r.TunnelId).Concat(Settings.WindowRules.Select(r => r.TunnelId)).Distinct())
             StartIfEnabled(id);
@@ -260,6 +271,41 @@ public sealed class VpnController : IDisposable
         lock (_tempRules) all.AddRange(_tempRules);
         Engine.SetRules(all);
         Engine.SetPidRules(Settings.WindowRules.Select(r => new KeyValuePair<int, string>(r.Pid, r.TunnelId)));
+        UpdateCapture(all.Count > 0 || Settings.WindowRules.Any(r => r.TunnelId.Length > 0));
+    }
+
+    /// <summary>
+    /// Paketumleitung nur, solange etwas umzuleiten ist: ohne Regeln läuft der PC mit voller Geschwindigkeit.
+    /// Wird synchron vor dem Rückkehren von ApplyRules eingeschaltet, damit kein Paket an der Regel vorbeigeht.
+    /// </summary>
+    private void UpdateCapture(bool wanted)
+    {
+        if (_capture == null || !_captureUsable) return;
+        string? error = null;
+        bool changed = false;
+        lock (_captureLock)
+        {
+            if (wanted && !_capture.IsRunning)
+            {
+                try
+                {
+                    _capture.Start(Engine);
+                    changed = CaptureError != null;
+                    CaptureError = null;
+                }
+                catch (Exception ex)
+                {
+                    error = $"Paketumleitung konnte nicht gestartet werden: {ex.Message}";
+                    changed = CaptureError != error;
+                    CaptureError = error;
+                }
+            }
+            else if (!wanted && _capture.IsRunning)
+            {
+                _capture.Stop();
+            }
+        }
+        if (changed) RaiseChanged();
     }
 
     // ---------------- IP prüfen ----------------

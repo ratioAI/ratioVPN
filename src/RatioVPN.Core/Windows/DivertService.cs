@@ -61,7 +61,7 @@ public sealed class DivertService : IPacketCapture, IDisposable
                 {
                     if (!_running) break;
                     int err = Marshal.GetLastWin32Error();
-                    if (err == 6 /* invalid handle */ || err == 995 /* aborted */) break;
+                    if (err == 6 /* invalid handle */ || err == 995 /* aborted */ || err == WinDivertNative.ErrorNoData) break;
                     continue;
                 }
                 Interlocked.Increment(ref _seen);
@@ -100,11 +100,20 @@ public sealed class DivertService : IPacketCapture, IDisposable
         }
     }
 
+    /// <summary>
+    /// Beendet die Umleitung. Wird auch im laufenden Betrieb genutzt (letzte Regel weg), deshalb sanft:
+    /// erst keine neuen Pakete mehr annehmen, wartende noch durchreichen (Worker enden mit ERROR_NO_DATA),
+    /// dann schließen. Klappt das nicht binnen 1 s, wird wie früher direkt geschlossen.
+    /// </summary>
     public void Stop()
     {
         if (!_running) return;
-        _running = false;
         var h = _handle;
+        bool drained = false;
+        try { drained = h != WinDivertNative.InvalidHandle && WinDivertNative.WinDivertShutdown(h, WinDivertNative.ShutdownRecv); }
+        catch (EntryPointNotFoundException) { }
+        if (drained) foreach (var t in _workers) t.Join(1000);
+        _running = false;
         _handle = WinDivertNative.InvalidHandle;
         if (h != WinDivertNative.InvalidHandle) WinDivertNative.WinDivertClose(h);
         foreach (var t in _workers) t.Join(1000);
