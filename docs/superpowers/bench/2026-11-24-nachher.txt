@@ -1,0 +1,8 @@
+Fall                   ns/op      B/op
+pass                    96,1       0,0
+parse-only              25,5       0,0
+pass-norules            26,5       0,0
+tunnel                5017,7       0,0
+inbound                296,8       0,0
+autopilot-step       16716,1   14872,0
+table-read          228328,7       0,0

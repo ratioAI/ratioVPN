@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text;
@@ -35,12 +34,15 @@ public sealed class WindowsProcessLookup : IProcessLookup
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr h);
 
-    private readonly PortOwnerCache _cache = new(tcp => tcp ? ReadTcp() : ReadUdp());
+    private readonly PortOwnerCache _cache;
+    private readonly NativeBuffer[] _buffers = { new(), new(), new(), new() }; // [tcp4, tcp6, udp4, udp6]
+
+    public WindowsProcessLookup() => _cache = new PortOwnerCache(Fill);
 
     public long TableReads => _cache.Reads;
 
-    public int? GetPid(byte protocol, ushort localPort, bool requireFresh) =>
-        _cache.GetPid(protocol, localPort, requireFresh);
+    public int? GetPid(byte protocol, ushort localPort, bool v6, bool requireFresh) =>
+        _cache.GetPid(protocol, localPort, v6, requireFresh);
 
     public string? GetExePath(int pid)
     {
@@ -55,58 +57,63 @@ public sealed class WindowsProcessLookup : IProcessLookup
         finally { CloseHandle(h); }
     }
 
-    private static Dictionary<ushort, int> ReadTcp()
+    // Zeilenlayouts (Bytes): MIB_TCPROW_OWNER_PID 24 (Port @8, PID @20) · MIB_TCP6ROW_OWNER_PID 56 (@20, @52)
+    //                      MIB_UDPROW_OWNER_PID 12 (@4, @8)  · MIB_UDP6ROW_OWNER_PID 28 (@20, @24)
+    private void Fill(bool tcp, bool v6, Dictionary<ushort, int> into)
     {
-        var d = new Dictionary<ushort, int>();
-        // MIB_TCPROW_OWNER_PID: state, localAddr, localPort, remoteAddr, remotePort, pid (je 4 Byte) = 24 Byte
-        ReadTable(true, AF_INET, rowSize: 24, portOff: 8, pidOff: 20, d);
-        // MIB_TCP6ROW_OWNER_PID: localAddr[16], localScope, localPort, remoteAddr[16], remoteScope, remotePort, state, pid = 56 Byte
-        ReadTable(true, AF_INET6, rowSize: 56, portOff: 20, pidOff: 52, d);
-        return d;
+        var (rowSize, portOff, pidOff) = tcp ? (v6 ? (56, 20, 52) : (24, 8, 20)) : (v6 ? (28, 20, 24) : (12, 4, 8));
+        // PortOwnerCache sperrt je Tabelle; jede Tabelle hat ihren eigenen Puffer → kein Wettlauf.
+        ReadTable(tcp, v6 ? AF_INET6 : AF_INET, rowSize, portOff, pidOff, _buffers[(tcp ? 0 : 2) + (v6 ? 1 : 0)], into);
     }
 
-    private static Dictionary<ushort, int> ReadUdp()
+    /// <summary>Wiederverwendeter nativer Puffer (wächst bei Bedarf, wird nie pro Lesen neu angelegt).</summary>
+    private sealed class NativeBuffer
     {
-        var d = new Dictionary<ushort, int>();
-        // MIB_UDPROW_OWNER_PID: localAddr, localPort, pid = 12 Byte
-        ReadTable(false, AF_INET, rowSize: 12, portOff: 4, pidOff: 8, d);
-        // MIB_UDP6ROW_OWNER_PID: localAddr[16], localScope, localPort, pid = 28 Byte
-        ReadTable(false, AF_INET6, rowSize: 28, portOff: 20, pidOff: 24, d);
-        return d;
+        public IntPtr Ptr;
+        public int Size;
+
+        public void EnsureSize(int size)
+        {
+            if (size <= Size) return;
+            if (Ptr != IntPtr.Zero) Marshal.FreeHGlobal(Ptr);
+            Ptr = Marshal.AllocHGlobal(size);
+            Size = size;
+        }
+
+        ~NativeBuffer()
+        {
+            if (Ptr != IntPtr.Zero) Marshal.FreeHGlobal(Ptr);
+        }
     }
 
-    private static void ReadTable(bool tcp, int af, int rowSize, int portOff, int pidOff, Dictionary<ushort, int> into)
+    private static unsafe void ReadTable(bool tcp, int af, int rowSize, int portOff, int pidOff, NativeBuffer buf, Dictionary<ushort, int> into)
     {
-        int size = 0;
         for (int attempt = 0; attempt < 4; attempt++)
         {
-            if (tcp) GetExtendedTcpTable(IntPtr.Zero, ref size, false, af, TCP_TABLE_OWNER_PID_ALL);
-            else GetExtendedUdpTable(IntPtr.Zero, ref size, false, af, UDP_TABLE_OWNER_PID);
-            if (size <= 0) return;
-            size += 4096;
-            var buf = Marshal.AllocHGlobal(size);
-            try
+            int size = buf.Size;
+            uint rc = tcp
+                ? GetExtendedTcpTable(buf.Ptr, ref size, false, af, TCP_TABLE_OWNER_PID_ALL)
+                : GetExtendedUdpTable(buf.Ptr, ref size, false, af, UDP_TABLE_OWNER_PID);
+            if (rc == 122) // ERROR_INSUFFICIENT_BUFFER – erster Aufruf oder Tabelle ist gewachsen
             {
-                uint rc = tcp
-                    ? GetExtendedTcpTable(buf, ref size, false, af, TCP_TABLE_OWNER_PID_ALL)
-                    : GetExtendedUdpTable(buf, ref size, false, af, UDP_TABLE_OWNER_PID);
-                if (rc == 122) continue; // ERROR_INSUFFICIENT_BUFFER – Tabelle ist gewachsen
-                if (rc != 0) return;
-                int count = Marshal.ReadInt32(buf);
-                var span = new byte[Math.Min(size, 4 + count * rowSize)];
-                Marshal.Copy(buf, span, 0, span.Length);
-                for (int i = 0; i < count; i++)
-                {
-                    int off = 4 + i * rowSize;
-                    if (off + rowSize > span.Length) break;
-                    // Port steht in Netzwerk-Byte-Reihenfolge in den unteren 16 Bit
-                    ushort port = BinaryPrimitives.ReadUInt16BigEndian(span.AsSpan(off + portOff));
-                    int pid = BinaryPrimitives.ReadInt32LittleEndian(span.AsSpan(off + pidOff));
-                    if (port != 0 && pid > 0) into.TryAdd(port, pid);
-                }
-                return;
+                buf.EnsureSize(size + size / 2 + 4096);
+                continue;
             }
-            finally { Marshal.FreeHGlobal(buf); }
+            if (rc != 0) return;
+
+            byte* p = (byte*)buf.Ptr;
+            int count = *(int*)p;
+            int max = (buf.Size - 4) / rowSize;
+            if (count > max) count = max;
+            for (int i = 0; i < count; i++)
+            {
+                byte* row = p + 4 + i * rowSize;
+                // Port steht in Netzwerk-Byte-Reihenfolge in den unteren 16 Bit
+                ushort port = (ushort)((row[portOff] << 8) | row[portOff + 1]);
+                int pid = *(int*)(row + pidOff);
+                if (port != 0 && pid > 0) into.TryAdd(port, pid);
+            }
+            return;
         }
     }
 }

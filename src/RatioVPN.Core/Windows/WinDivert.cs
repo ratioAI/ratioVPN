@@ -50,6 +50,15 @@ public static class WinDivertNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool WinDivertClose(IntPtr handle);
 
+    /// <summary>WINDIVERT_SHUTDOWN_RECV: keine neuen Pakete mehr einreihen; wartende können noch gelesen werden.</summary>
+    public const int ShutdownRecv = 0x1;
+    /// <summary>WinDivertRecv nach Shutdown, Warteschlange leer.</summary>
+    public const int ErrorNoData = 232;
+
+    [DllImport(Dll, SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool WinDivertShutdown(IntPtr handle, int how);
+
     [DllImport(Dll, SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool WinDivertSetParam(IntPtr handle, int param, ulong value);

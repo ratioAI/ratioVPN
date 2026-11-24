@@ -1,5 +1,4 @@
-using System.ComponentModel;
-using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Runtime.Versioning;
 using RatioVPN.Core.Routing;
 using RatioVPN.Core;
@@ -15,70 +14,105 @@ public sealed class DivertService : IPacketCapture, IDisposable
 {
     private const string Filter = "outbound and !loopback and (tcp or udp)";
 
-    private IntPtr _handle = WinDivertNative.InvalidHandle;
-    private readonly List<Thread> _workers = new();
-    private volatile bool _running;
-    private RoutingEngine? _engine;
+    /// <summary>So lange dürfen die Worker nach dem Shutdown die wartenden Pakete noch durchreichen.</summary>
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(1);
+    /// <summary>So lange wird auf laufende Sende-/Einspeise-Aufrufe gewartet, bevor trotzdem geschlossen wird.</summary>
+    private static readonly TimeSpan BusyTimeout = TimeSpan.FromSeconds(5);
 
-    public bool IsRunning => _running;
+    private readonly IDivertNative _native;
+    private volatile Session? _session;
+    /// <summary>Hintergrund-Threads, die alte Handles gerade beenden (Dispose wartet auf sie).</summary>
+    private readonly List<Thread> _stopping = new();
+
+    public DivertService() : this(new WinDivertApi()) { }
+    public DivertService(IDivertNative native) => _native = native;
+
+    public bool IsRunning => _session != null;
     public long PacketsSeen => Interlocked.Read(ref _seen);
     private long _seen;
 
-    public void Start(RoutingEngine engine, int workerCount = 0)
+    /// <summary>
+    /// Ein geöffnetes Handle mit seinen Workern. Jede Nutzung des Handles nach dem Empfang (Senden, Einspeisen)
+    /// meldet sich an; geschlossen wird erst, wenn keine mehr läuft – so trifft nie ein Aufruf ein geschlossenes
+    /// (und von Windows evtl. schon neu vergebenes) Handle.
+    /// </summary>
+    private sealed class Session
     {
-        if (_running) return;
-        _engine = engine;
-        var h = WinDivertNative.WinDivertOpen(Filter, WinDivertNative.LayerNetwork, 0, 0);
-        if (h == WinDivertNative.InvalidHandle || h == IntPtr.Zero)
-        {
-            int err = Marshal.GetLastWin32Error();
-            throw new Win32Exception(err, WinDivertNative.DescribeError(err));
-        }
-        WinDivertNative.WinDivertSetParam(h, WinDivertNative.ParamQueueLength, 8192);
-        WinDivertNative.WinDivertSetParam(h, WinDivertNative.ParamQueueTime, 2000);
-        WinDivertNative.WinDivertSetParam(h, WinDivertNative.ParamQueueSize, 16 * 1024 * 1024);
-        _handle = h;
-        _running = true;
+        public IntPtr Handle { get; }
+        public List<Thread> Workers { get; } = new();
+        private int _busy;
+        private int _sealed;
 
-        int n = workerCount > 0 ? workerCount : Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
-        for (int i = 0; i < n; i++)
+        public Session(IntPtr handle) => Handle = handle;
+
+        public bool Sealed => Volatile.Read(ref _sealed) != 0;
+
+        public bool TryEnter()
         {
-            var t = new Thread(Worker) { IsBackground = true, Name = $"divert-{i}", Priority = ThreadPriority.AboveNormal };
-            _workers.Add(t);
-            t.Start();
+            Interlocked.Increment(ref _busy); // volle Barriere, dann _sealed lesen (Gegenstück in Seal)
+            if (Volatile.Read(ref _sealed) == 0) return true;
+            Interlocked.Decrement(ref _busy);
+            return false;
+        }
+
+        public void Exit() => Interlocked.Decrement(ref _busy);
+
+        /// <summary>Keine neuen Aufrufe mehr zulassen und auf laufende warten. false = Zeitlimit.</summary>
+        public bool Seal(TimeSpan timeout)
+        {
+            Interlocked.Exchange(ref _sealed, 1); // volle Barriere, dann _busy lesen (Gegenstück in TryEnter)
+            var sw = Stopwatch.StartNew();
+            while (Volatile.Read(ref _busy) > 0)
+            {
+                if (sw.Elapsed > timeout) return false;
+                Thread.Sleep(1);
+            }
+            return true;
         }
     }
 
-    private unsafe void Worker()
+    public void Start(RoutingEngine engine, int workerCount = 0)
+    {
+        if (_session != null) return;
+        var s = new Session(_native.Open(Filter));
+        int n = workerCount > 0 ? workerCount : Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
+        for (int i = 0; i < n; i++)
+            s.Workers.Add(new Thread(() => Worker(s, engine)) { IsBackground = true, Name = $"divert-{i}", Priority = ThreadPriority.AboveNormal });
+        _session = s;
+        foreach (var t in s.Workers) t.Start();
+    }
+
+    private unsafe void Worker(Session s, RoutingEngine engine)
     {
         var buf = new byte[65535 + 40];
-        var engine = _engine!;
         fixed (byte* p = buf)
         {
-            while (_running)
+            while (!s.Sealed)
             {
-                if (!WinDivertNative.WinDivertRecv(_handle, p, (uint)buf.Length, out uint len, out var addr))
+                int err = _native.Recv(s.Handle, p, (uint)buf.Length, out uint len, out var addr);
+                if (err != 0)
                 {
-                    if (!_running) break;
-                    int err = Marshal.GetLastWin32Error();
-                    if (err == 6 /* invalid handle */ || err == 995 /* aborted */) break;
+                    if (s.Sealed || err == 6 /* invalid handle */ || err == 995 /* aborted */ || err == WinDivertNative.ErrorNoData) break;
                     continue;
                 }
-                Interlocked.Increment(ref _seen);
-
-                OutboundVerdict verdict;
+                if (!s.TryEnter()) break; // wird gerade geschlossen
                 try
                 {
-                    verdict = engine.HandleOutbound(buf.AsSpan(0, (int)len), addr.IfIdx, addr.SubIfIdx);
+                    Interlocked.Increment(ref _seen);
+                    OutboundVerdict verdict;
+                    try
+                    {
+                        verdict = engine.HandleOutbound(buf.AsSpan(0, (int)len), addr.IfIdx, addr.SubIfIdx);
+                    }
+                    catch
+                    {
+                        verdict = OutboundVerdict.Drop; // HandleOutbound fängt selbst ab – hier nur Unvorhergesehenes
+                    }
+                    if (verdict == OutboundVerdict.Pass) _native.Send(s.Handle, p, len, ref addr);
                 }
-                catch
+                finally
                 {
-                    verdict = OutboundVerdict.Pass; // Im Zweifel nichts kaputt machen
-                }
-
-                if (verdict == OutboundVerdict.Pass)
-                {
-                    WinDivertNative.WinDivertSend(_handle, p, len, out _, ref addr);
+                    s.Exit();
                 }
             }
         }
@@ -86,30 +120,73 @@ public sealed class DivertService : IPacketCapture, IDisposable
 
     public unsafe void InjectInbound(byte[] packet, int length, uint ifIdx, uint subIfIdx)
     {
-        if (!_running) return;
-        var addr = new WinDivertAddress
+        var s = _session;
+        if (s == null || !s.TryEnter()) return;
+        try
         {
-            IfIdx = ifIdx,
-            SubIfIdx = subIfIdx,
-        };
-        addr.Outbound = false;
-        fixed (byte* p = packet)
+            var addr = new WinDivertAddress
+            {
+                IfIdx = ifIdx,
+                SubIfIdx = subIfIdx,
+            };
+            addr.Outbound = false;
+            fixed (byte* p = packet)
+            {
+                _native.CalcChecksums(p, (uint)length, ref addr);
+                _native.Send(s.Handle, p, (uint)length, ref addr);
+            }
+        }
+        finally
         {
-            WinDivertNative.WinDivertHelperCalcChecksums(p, (uint)length, ref addr, 0);
-            WinDivertNative.WinDivertSend(_handle, p, (uint)length, out _, ref addr);
+            s.Exit();
         }
     }
 
+    /// <summary>
+    /// Beendet die Umleitung. Wird auch im laufenden Betrieb genutzt (letzte Regel weg) und kehrt sofort zurück:
+    /// das Handle wird im Hintergrund sanft beendet. Ein sofortiges <see cref="Start"/> öffnet ein neues Handle.
+    /// </summary>
     public void Stop()
     {
-        if (!_running) return;
-        _running = false;
-        var h = _handle;
-        _handle = WinDivertNative.InvalidHandle;
-        if (h != WinDivertNative.InvalidHandle) WinDivertNative.WinDivertClose(h);
-        foreach (var t in _workers) t.Join(1000);
-        _workers.Clear();
+        var s = Interlocked.Exchange(ref _session, null);
+        if (s == null) return;
+        var t = new Thread(() => Shutdown(s)) { IsBackground = true, Name = "divert-stop" };
+        lock (_stopping)
+        {
+            _stopping.RemoveAll(x => !x.IsAlive);
+            _stopping.Add(t);
+            t.Start(); // im Lock: Dispose sieht nie einen noch nicht gestarteten Thread
+        }
     }
 
-    public void Dispose() => Stop();
+    private void Shutdown(Session s)
+    {
+        // 1. Keine neuen Pakete mehr annehmen; wartende werden noch durchgereicht (Worker enden mit ERROR_NO_DATA).
+        if (_native.Shutdown(s.Handle)) JoinAll(s.Workers, DrainTimeout);
+        // 2. Keine neuen Sende-/Einspeise-Aufrufe; laufende abwarten – erst dann ist Schließen sicher.
+        s.Seal(BusyTimeout);
+        // 3. Schließen; weckt Worker, die noch in Recv warten (falls der Shutdown sie nicht geweckt hat).
+        _native.Close(s.Handle);
+        JoinAll(s.Workers, DrainTimeout);
+    }
+
+    private static bool JoinAll(List<Thread> threads, TimeSpan timeout)
+    {
+        var sw = Stopwatch.StartNew();
+        foreach (var t in threads)
+        {
+            var left = timeout - sw.Elapsed;
+            if (left <= TimeSpan.Zero || !t.Join(left)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Beenden und warten, bis alle Handles geschlossen sind (Programmende).</summary>
+    public void Dispose()
+    {
+        Stop();
+        Thread[] pending;
+        lock (_stopping) pending = _stopping.ToArray();
+        foreach (var t in pending) t.Join(DrainTimeout + BusyTimeout + DrainTimeout);
+    }
 }

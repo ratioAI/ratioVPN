@@ -1,0 +1,122 @@
+<UserControl x:Class="RatioVPN.App.Pages.StatsPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:RatioVPN.App">
+    <UserControl.Resources>
+        <Style x:Key="Kpi" TargetType="Border" BasedOn="{StaticResource Card}">
+            <Setter Property="Margin" Value="0,0,10,10"/>
+            <Setter Property="Padding" Value="16,12"/>
+        </Style>
+    </UserControl.Resources>
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
+        <StackPanel Margin="0,0,0,18">
+
+            <!-- Kennzahlen -->
+            <UniformGrid Columns="4" Margin="0,0,-10,0">
+                <Border Style="{StaticResource Kpi}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE7BA;" Foreground="{StaticResource Warning}" HorizontalAlignment="Left"/>
+                        <TextBlock Text="{Binding Stats.Failures30}" FontFamily="{StaticResource DisplayFont}" FontSize="26" FontWeight="SemiBold" Margin="0,6,0,0"/>
+                        <TextBlock Text="Ausfälle in 30 Tagen" Style="{StaticResource MutedText}"/>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Kpi}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE8AB;" Foreground="{StaticResource AccentHover}" HorizontalAlignment="Left"/>
+                        <TextBlock Text="{Binding Stats.Switches30}" FontFamily="{StaticResource DisplayFont}" FontSize="26" FontWeight="SemiBold" Margin="0,6,0,0"/>
+                        <TextBlock Text="automatische Wechsel" Style="{StaticResource MutedText}"/>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Kpi}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE7E8;" Foreground="{StaticResource Danger}" HorizontalAlignment="Left"/>
+                        <TextBlock Text="{Binding Stats.Kicks30}" FontFamily="{StaticResource DisplayFont}" FontSize="26" FontWeight="SemiBold" Margin="0,6,0,0"/>
+                        <TextBlock Text="Kicks erkannt" Style="{StaticResource MutedText}"/>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Kpi}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE871;" Foreground="{StaticResource Muted}" HorizontalAlignment="Left"/>
+                        <TextBlock Text="{Binding Stats.InternetDowns30}" FontFamily="{StaticResource DisplayFont}" FontSize="26" FontWeight="SemiBold" Margin="0,6,0,0"/>
+                        <TextBlock Text="Internet-Ausfälle" Style="{StaticResource MutedText}"/>
+                    </StackPanel>
+                </Border>
+            </UniformGrid>
+
+            <!-- Ausfälle pro Tag -->
+            <Border Style="{StaticResource Card}" Padding="18,16">
+                <StackPanel>
+                    <Grid>
+                        <TextBlock Text="Ausfälle pro Tag" Style="{StaticResource H2}"/>
+                        <TextBlock Text="letzte 30 Tage" Style="{StaticResource MutedText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    </Grid>
+                    <TextBlock Style="{StaticResource MutedText}" FontSize="12" Margin="0,2,0,12" TextWrapping="Wrap"
+                               Text="Hohe Spitzen an einem Tag deuten eher auf einen Ausfall deines Internets hin als auf schlechte Server."/>
+                    <local:BarChart Height="180" Values="{Binding Stats.FailureValues}" Labels="{Binding Stats.FailureLabels}"
+                                    BarBrush="{StaticResource AccentGradient}" PeakBrush="{StaticResource Warning}" Unit=""/>
+                </StackPanel>
+            </Border>
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="10"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Ranking -->
+                <Border Style="{StaticResource Card}" Padding="18,16">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,12">
+                            <TextBlock Text="Unzuverlässigste Verbindungen" Style="{StaticResource H2}"/>
+                            <TextBlock Text="7 Tage" Style="{StaticResource MutedText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                        </Grid>
+                        <TextBlock Text="Keine Ausfälle in den letzten 7 Tagen." Style="{StaticResource MutedText}"
+                                   Visibility="{Binding Stats.Ranking.Count, Converter={StaticResource CountToVis}, ConverterParameter=0}"/>
+                        <ItemsControl ItemsSource="{Binding Stats.Ranking}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type local:RankItem}">
+                                    <Grid Margin="0,4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="130"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="80"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Tunnel}" FontSize="12.5" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                        <Grid Grid.Column="1" Height="8" Margin="8,0" VerticalAlignment="Center">
+                                            <Border CornerRadius="4" Background="#0DFFFFFF"/>
+                                            <Grid HorizontalAlignment="Left" Width="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=Grid}}">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="{Binding Fraction, Converter={x:Static local:FractionToStarConverter.Instance}}"/>
+                                                    <ColumnDefinition Width="{Binding Fraction, Converter={x:Static local:FractionToStarConverter.Instance}, ConverterParameter=rest}"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Border CornerRadius="4" Background="{StaticResource Warning}"/>
+                                            </Grid>
+                                        </Grid>
+                                        <TextBlock Grid.Column="2" Text="{Binding FailuresText}" Style="{StaticResource MutedText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!-- Datenmenge -->
+                <Border Grid.Column="2" Style="{StaticResource Card}" Padding="18,16">
+                    <StackPanel>
+                        <Grid>
+                            <TextBlock Text="Datenmenge pro Tag" Style="{StaticResource H2}"/>
+                            <TextBlock Style="{StaticResource MutedText}" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                <Run Text="14 Tage: "/><Run Text="{Binding Stats.Traffic14, Mode=OneWay}"/>
+                            </TextBlock>
+                        </Grid>
+                        <local:BarChart Height="150" Margin="0,12,0,0" Values="{Binding Stats.TrafficValues}" Labels="{Binding Stats.TrafficLabels}"
+                                        BarBrush="{StaticResource AccentGradient}" FormatBytes="True"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <TextBlock Text="{Binding Stats.Since}" Style="{StaticResource MutedText}" Margin="4,4,0,0"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

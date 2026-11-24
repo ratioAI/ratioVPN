@@ -10,6 +10,7 @@ public interface IPacketCapture : IPacketInjector
 {
     void Start(RoutingEngine engine, int workerCount = 0);
     void Stop();
+    bool IsRunning { get; }
 }
 
 /// <summary>
@@ -25,6 +26,23 @@ public sealed class VpnController : IDisposable
     private readonly Dictionary<string, string> _tempRules = new(StringComparer.OrdinalIgnoreCase);
 
     public AppSettings Settings { get; private set; } = new();
+
+    /// <summary>Fehler beim Einschalten der Paketumleitung (z. B. Treiber blockiert), sonst null.</summary>
+    public string? CaptureError { get; private set; }
+    private readonly object _captureLock = new();
+    private bool _captureUsable;
+    private bool _captureWanted;
+    /// <summary>Nach Dispose darf nichts die Umleitung wieder öffnen (z. B. eine noch laufende IP-Prüfung).</summary>
+    private bool _disposed;
+
+    /// <summary>Öffentliche IPs dürfen nur mit laufender Umleitung geprüft werden – sonst käme die echte IP heraus.</summary>
+    public bool CanCheckPublicIp => _capture != null && _captureUsable && CaptureError == null;
+
+    /// <summary>Erneuter Versuch, wenn die Umleitung gebraucht wird, aber nicht läuft (regelmäßig aufrufen).</summary>
+    public void RetryCapture()
+    {
+        if (_capture != null && _captureUsable && _captureWanted && !_capture.IsRunning) UpdateCapture(true);
+    }
     public RoutingEngine Engine { get; }
 
     /// <summary>Etwas hat sich geändert (Tunnelstatus, Regeln …). Kann aus beliebigem Thread kommen.</summary>
@@ -55,6 +73,7 @@ public sealed class VpnController : IDisposable
     {
         var problems = new List<string>();
         Settings = _store.Load();
+        if (AutoRuleMigration.Apply(Settings) || _store.RestoredExtras) Save();
         Engine.KillSwitch = Settings.KillSwitch;
 
         foreach (var entry in Settings.Tunnels.ToList())
@@ -70,8 +89,13 @@ public sealed class VpnController : IDisposable
             }
         }
         PruneWindowRules(save: false);
-        ApplyRules();
-        _capture?.Start(Engine);
+        // Einmal öffnen, damit Treiberprobleme sofort beim Start auffallen (Fehler gehen an den Aufrufer).
+        if (_capture != null)
+        {
+            _capture.Start(Engine);
+            _captureUsable = true;
+        }
+        ApplyRules(); // schließt die Umleitung wieder, wenn noch keine Regel existiert
 
         foreach (var id in Settings.Rules.Select(r => r.TunnelId).Concat(Settings.WindowRules.Select(r => r.TunnelId)).Distinct())
             StartIfEnabled(id);
@@ -195,14 +219,15 @@ public sealed class VpnController : IDisposable
     /// Weist einem einzelnen Prozess (z. B. einem von zwei Java-Fenstern) eine eigene Verbindung zu.
     /// value: Tunnel-ID, "" für ohne VPN, null für "wie das Programm".
     /// </summary>
-    public void AssignWindow(int pid, string exePath, string title, string? value)
+    public void AssignWindow(int pid, string exePath, string title, string? value, bool auto = false)
     {
         Settings.WindowRules.RemoveAll(r => r.Pid == pid);
-        if (value != null)
+        long start = value != null ? ProcessStartTicks(pid) : 0;
+        // Prozess existiert nicht mehr: Regel bleibt entfernt – trotzdem ApplyRules, sonst behält das Routing
+        // die alte Prozessregel (und eine wiederverwendete PID würde sie erben).
+        if (value != null && start != 0)
         {
-            long start = ProcessStartTicks(pid);
-            if (start == 0) return; // Prozess existiert nicht mehr
-            Settings.WindowRules.Add(new WindowRuleEntry { Pid = pid, StartTimeTicks = start, ExePath = exePath, Title = title, TunnelId = value });
+            Settings.WindowRules.Add(new WindowRuleEntry { Pid = pid, StartTimeTicks = start, ExePath = exePath, Title = title, TunnelId = value, Auto = auto });
             if (value.Length > 0)
             {
                 var e = Settings.Tunnels.FirstOrDefault(t => t.Id == value);
@@ -260,6 +285,46 @@ public sealed class VpnController : IDisposable
         lock (_tempRules) all.AddRange(_tempRules);
         Engine.SetRules(all);
         Engine.SetPidRules(Settings.WindowRules.Select(r => new KeyValuePair<int, string>(r.Pid, r.TunnelId)));
+        UpdateCapture(all.Count > 0 || Settings.WindowRules.Any(r => r.TunnelId.Length > 0));
+    }
+
+    /// <summary>
+    /// Paketumleitung nur, solange etwas umzuleiten ist: ohne Regeln läuft der PC mit voller Geschwindigkeit.
+    /// Wird synchron vor dem Rückkehren von ApplyRules eingeschaltet, damit kein Paket an der Regel vorbeigeht.
+    /// </summary>
+    private void UpdateCapture(bool wanted)
+    {
+        _captureWanted = wanted;
+        if (_capture == null || !_captureUsable) return;
+        string? error = null;
+        bool changed = false;
+        lock (_captureLock)
+        {
+            if (_disposed) return;
+            if (wanted && !_capture.IsRunning)
+            {
+                try
+                {
+                    _capture.Start(Engine);
+                    changed = CaptureError != null;
+                    CaptureError = null;
+                }
+                catch (Exception ex)
+                {
+                    error = $"Paketumleitung konnte nicht gestartet werden: {ex.Message}";
+                    changed = CaptureError != error;
+                    CaptureError = error;
+                }
+            }
+            else if (!wanted)
+            {
+                if (_capture.IsRunning) _capture.Stop();
+                // Nichts mehr umzuleiten → nichts ungeschützt: ein alter Fehler soll nicht stehen bleiben.
+                changed = CaptureError != null;
+                CaptureError = null;
+            }
+        }
+        if (changed) RaiseChanged();
     }
 
     // ---------------- IP prüfen ----------------
@@ -270,6 +335,8 @@ public sealed class VpnController : IDisposable
     /// </summary>
     public async Task<string> CheckPublicIpAsync(string tunnelId, CancellationToken ct = default)
     {
+        if (!CanCheckPublicIp)
+            throw new InvalidOperationException("Paketumleitung läuft nicht – die Prüfung würde deine echte IP zeigen.");
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var curl = Path.Combine(Environment.SystemDirectory, "curl.exe");
         if (!File.Exists(curl)) throw new FileNotFoundException("curl.exe fehlt (Windows 10 1803 oder neuer nötig).");
@@ -283,6 +350,12 @@ public sealed class VpnController : IDisposable
 
         lock (_tempRules) _tempRules[exe] = tunnelId;
         ApplyRules();
+        if (_capture?.IsRunning != true)
+        {
+            lock (_tempRules) _tempRules.Remove(exe);
+            ApplyRules();
+            throw new InvalidOperationException("Paketumleitung läuft nicht – die Prüfung würde deine echte IP zeigen.");
+        }
         StartIfEnabled(tunnelId);
         try
         {
@@ -322,7 +395,12 @@ public sealed class VpnController : IDisposable
 
     public void Dispose()
     {
-        _capture?.Stop();
+        lock (_captureLock)
+        {
+            _disposed = true;
+            _capture?.Stop();
+        }
+        (_capture as IDisposable)?.Dispose();
         foreach (var t in Tunnels) t.Stop();
         Engine.Dispose();
     }

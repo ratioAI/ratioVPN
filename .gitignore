@@ -1,6 +1,7 @@
 bin/
 obj/
 publish/
+publish-2.0/
 .vs/
 *.user
 *.conf

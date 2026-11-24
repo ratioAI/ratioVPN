@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using RatioVPN.Core;
 using RatioVPN.Core.Settings;
 
 namespace RatioVPN.App;
@@ -102,6 +104,39 @@ public static class WindowEnumerator
     }
 }
 
+/// <summary>Findet laufende Prozesse nach Programmdatei (für Automatik-Regeln ohne Fenster).</summary>
+public static class ProcessEnumerator
+{
+    public static List<ProcessInfo> Find(IReadOnlyCollection<string> exeNames)
+    {
+        var result = new List<ProcessInfo>();
+        if (exeNames.Count == 0) return result;
+        var wanted = new HashSet<string>(exeNames, StringComparer.OrdinalIgnoreCase);
+        int self = Environment.ProcessId;
+        foreach (var p in Process.GetProcesses())
+        {
+            using (p)
+            {
+                if (p.Id <= 4 || p.Id == self) continue;
+                if (!wanted.Contains(p.ProcessName + ".exe")) continue;
+                var path = WindowEnumerator.ExePath(p.Id);
+                if (path != null) result.Add(new ProcessInfo(p.Id, path));
+            }
+        }
+        return result;
+    }
+}
+
+/// <summary>Ein gemeinsamer Scan (Fenster + gesuchte Prozesse) für Automatik und Programmliste.</summary>
+public static class SystemScanner
+{
+    public static SystemSnapshot Take(IReadOnlyCollection<string> processExeNames)
+    {
+        var windows = WindowEnumerator.GetOpenWindows().Select(w => new WindowInfo(w.Pid, w.ExePath, w.Title)).ToList();
+        return new SystemSnapshot(windows, ProcessEnumerator.Find(processExeNames));
+    }
+}
+
 /// <summary>Programm-Icons als WPF-Bilder, zwischengespeichert.</summary>
 public static class IconCache
 {
@@ -182,6 +217,28 @@ public static class AutostartTask
             using var p = Process.Start(psi)!;
             p.WaitForExit(5000);
             return p.ExitCode == 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Zeigt der Autostart auf eine andere exe (z. B. nach dem Umstieg auf eine neue Version), wird er auf
+    /// diese exe umgestellt. true = umgestellt. Fehler werden geschluckt (nie Absturz beim Start).
+    /// </summary>
+    public static bool EnsurePointsTo(string exePath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{TaskName}\" /XML")
+            { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+            using var p = Process.Start(psi)!;
+            var xml = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+            if (p.ExitCode != 0) return false;
+            var current = RatioVPN.Core.Windows.TaskXml.CommandPath(xml);
+            if (current == null) return false;
+            if (string.Equals(Path.GetFullPath(current), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase)) return false;
+            return Set(true);
         }
         catch { return false; }
     }

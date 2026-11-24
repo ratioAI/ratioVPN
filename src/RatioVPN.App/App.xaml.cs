@@ -97,7 +97,32 @@ public partial class App : Application
             Log(ex.ToString());
         }
 
-        var vm = new MainViewModel(_controller) { Banner = banner ?? "" };
+        // Nach dem Umstieg auf eine neue Version: Autostart auf diese exe umstellen (im Hintergrund, blockiert den Start nicht).
+        var self = Environment.ProcessPath;
+        if (self != null)
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                if (AutostartTask.IsEnabled() && AutostartTask.EnsurePointsTo(self)) Log("Autostart zeigt jetzt auf " + self);
+            });
+
+        // Statistik: beim ersten Start von 2.0 einmalig rückwirkend aus fehler.log füllen
+        var statsPath = Path.Combine(Path.GetDirectoryName(LogPath)!, "statistik.jsonl");
+        bool firstStats = !File.Exists(statsPath);
+        var stats = new RatioVPN.Core.Stats.StatsStore(statsPath);
+        if (firstStats)
+        {
+            try { Log($"Statistik: {RatioVPN.Core.Stats.LogBackfill.Import(LogPath, stats)} Ereignisse aus dem Protokoll übernommen"); }
+            catch (Exception ex) { Log("Statistik-Rückblick: " + ex.Message); }
+        }
+
+        var vm = new MainViewModel(_controller, ShellOptions.Default with { Stats = stats }) { StartupBanner = banner ?? "" };
+
+        // Zuverlässigkeit der letzten 24 h übernehmen (Statistik kennt Namen, die Automatik IDs)
+        var idByName = _controller.Tunnels.GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Id, StringComparer.OrdinalIgnoreCase);
+        vm.AutoPilot.SeedFailures(stats.RecentFailures(TimeSpan.FromHours(24))
+            .Where(f => idByName.ContainsKey(f.TunnelName))
+            .Select(f => (idByName[f.TunnelName], f.Time)));
         _window = new MainWindow(vm);
         _window.Closing += (_, args) =>
         {
@@ -115,7 +140,10 @@ public partial class App : Application
             }
         };
 
-        _tray = new TrayIcon(ShowWindow, ExitApp);
+        _tray = new TrayIcon(ShowWindow, ExitApp, () => vm.AutoPilotEnabled, v => vm.AutoPilotEnabled = v);
+        vm.TrayStatusChanged += (status, tip) => _tray?.SetStatus(status, tip);
+        vm.NotifyRequested += (title, text) => { if (_window?.IsVisible != true) _tray?.Notify(title, text); };
+        vm.RefreshFast();
 
         bool minimized = e.Args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase)) || _controller.Settings.StartMinimized;
         if (!minimized || banner != null) _window.Show();
@@ -183,8 +211,12 @@ public partial class App : Application
         e.Handled = true;
     }
 
+    /// <summary>Ersetzt das Protokoll (z. B. im Vorschau-Werkzeug: nie in die echte fehler.log schreiben).</summary>
+    public static Action<string>? LogOverride { get; set; }
+
     public static void Log(string text)
     {
+        if (LogOverride != null) { LogOverride(text); return; }
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
