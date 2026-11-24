@@ -551,7 +551,12 @@ Console.WriteLine("Automatik (jedes Fenster eine eigene Verbindung, Wechsel bei 
     var windows = new[] { mc1, mc2, chrome };
 
     Check("Titel-Muster: „Minecraft* 26.2“ ja, „26.21“ und „1.21“ nein",
-        ap.Matches(mc1.Title) && ap.Matches(mc2.Title) && !ap.Matches(chrome.Title) && !ap.Matches("Minecraft 1.21"));
+        ap.RuleFor(mc1.Pid, mc1.ExePath, mc1.Title) != null && ap.RuleFor(mc2.Pid, mc2.ExePath, mc2.Title) != null
+        && ap.RuleFor(chrome.Pid, chrome.ExePath, chrome.Title) == null && ap.RuleFor(me, mc1.ExePath, "Minecraft 1.21") == null);
+    var kelp = "How to get UNLIMITED Dried Kelp Blocks | Minecraft* 26.2";
+    Check("YouTube-Fenster mit Minecraft-Titel wird ignoriert",
+        System.Text.RegularExpressions.Regex.IsMatch(kelp, c.Settings.AutoPilot.TitlePattern) // altes Muster allein hätte gegriffen
+        && ap.RuleFor(424243, @"C:\Chrome\chrome.exe", kelp) == null);
 
     ap.Step(windows);
     string? r1 = c.WindowRuleFor(me), r2 = c.WindowRuleFor(other);
@@ -564,6 +569,8 @@ Console.WriteLine("Automatik (jedes Fenster eine eigene Verbindung, Wechsel bei 
     ap.Step(windows);
     Check("Verbindung fällt aus → Fenster wechselt auf die freie Reserve (C)", c.WindowRuleFor(me) == cc.Id && c.WindowRuleFor(other) == r2);
     Check("Wechsel steht im Verlauf", ap.History.Any(e => e.Important && e.Message.Contains("gewechselt auf C")));
+    Check("Ereignisse tragen Art und Verbindung",
+        ap.History.Any(e => e.Kind == AutoPilotEventKind.Switched && e.TunnelId == cc.Id && e.Pid == me));
 
     Fail(cc);
     ap.Step(windows);
@@ -586,6 +593,55 @@ Console.WriteLine("Automatik (jedes Fenster eine eigene Verbindung, Wechsel bei 
 
     foreach (var t in new[] { a, b, cc }) t.Stop();
     try { sleeper.Kill(); } catch { }
+    try { Directory.Delete(dir, true); } catch { }
+}
+
+// ---------------------------------------------------------------- Automatik-Regeln: beliebige Programme
+Console.WriteLine("Automatik-Regeln für beliebige Programme (Prozess-Erkennung, gemeinsamer Modus):");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "settings.json")), new PlainProtector(), new FakeLookup(), null);
+    c.Start();
+    var a = c.ImportConfig("A.conf", TestConf());
+    var b = c.ImportConfig("B.conf", TestConf());
+    var cc = c.ImportConfig("C.conf", TestConf());
+    void Ready(WgTunnel t) => t.ForceStateForTest(TunnelState.Connected);
+    void Fail(WgTunnel t) => t.ForceStateForTest(TunnelState.Error);
+    foreach (var t in new[] { a, b, cc }) { t.Start(); Ready(t); }
+    using var s1 = StartSleeper();
+    using var s2 = StartSleeper();
+    var ap = new AutoPilot(c);
+
+    // Prozessregel (ohne Fenster), getrennt
+    c.Settings.AutoRules = new() { new AutoRuleEntry { Name = "Bot", ExeNames = "bot.exe", Mode = AutoRuleMode.Separate } };
+    Check("Prozessregel meldet ihre Programmdatei für den Scan", ap.ProcessExeNames.Contains("bot.exe"));
+    ap.Step(new SystemSnapshot(Array.Empty<WindowInfo>(), new[] { new ProcessInfo(s1.Id, @"C:\Tools\bot.exe") }));
+    var r1 = c.WindowRuleFor(s1.Id);
+    Check("Prozessregel ohne Fenster bekommt eine Verbindung", r1 == a.Id || r1 == b.Id || r1 == cc.Id, r1);
+    Check("Cockpit sieht die verwaltete Instanz", ap.Instances.Count == 1 && ap.Instances[0].Pid == s1.Id && ap.Instances[0].TunnelId == r1);
+    c.AssignWindow(s1.Id, "", "", null);
+
+    // Gemeinsamer Modus
+    c.Settings.AutoRules = new() { new AutoRuleEntry { Name = "Bots", ExeNames = "bot.exe", Mode = AutoRuleMode.Shared } };
+    var both = new SystemSnapshot(Array.Empty<WindowInfo>(), new[] { new ProcessInfo(s1.Id, @"C:\Tools\bot.exe"), new ProcessInfo(s2.Id, @"D:\Bots\BOT.EXE") });
+    ap.Step(both);
+    string? g1 = c.WindowRuleFor(s1.Id), g2 = c.WindowRuleFor(s2.Id);
+    Check("Gemeinsamer Modus: zwei Prozesse, eine Verbindung", g1 != null && g1 == g2 && g1 != RoutingEngine.BlockRule, $"{g1}/{g2}");
+    Fail(c.GetTunnel(g1!)!);
+    ap.Step(both);
+    string? h1 = c.WindowRuleFor(s1.Id), h2 = c.WindowRuleFor(s2.Id);
+    Check("Gemeinsamer Modus wechselt bei Ausfall alle zusammen", h1 != null && h1 == h2 && h1 != g1 && h1 != RoutingEngine.BlockRule, $"{h1}/{h2}");
+
+    // Kaputte/leere Regeln
+    c.Settings.AutoRules = new() { new AutoRuleEntry { Name = "Leer" } };
+    Check("Regel ohne Exe und ohne Titel passt auf nichts", ap.RuleFor(s1.Id, @"C:\x\any.exe", "Irgendein Fenster") == null);
+    c.Settings.AutoRules = new() { new AutoRuleEntry { Name = "Kaputt", TitlePattern = "([" } };
+    bool crashed = false;
+    try { ap.Step(new SystemSnapshot(new[] { new WindowInfo(s1.Id, @"C:\x\a.exe", "([") }, Array.Empty<ProcessInfo>())); } catch { crashed = true; }
+    Check("Ungültiges Muster passt auf nichts, kein Absturz", !crashed && ap.RuleFor(s1.Id, @"C:\x\a.exe", "([") == null);
+
+    foreach (var t in new[] { a, b, cc }) t.Stop();
+    try { s1.Kill(); s2.Kill(); } catch { }
     try { Directory.Delete(dir, true); } catch { }
 }
 
