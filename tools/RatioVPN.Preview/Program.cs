@@ -63,7 +63,7 @@ internal static class Program
         foreach (var page in pages)
         {
             vm.CurrentPage = page;
-            vm.RefreshFast();
+            demo.Decorate(vm);
             var win = new MainWindow(vm, useBackdrop: false)
             {
                 Width = width,

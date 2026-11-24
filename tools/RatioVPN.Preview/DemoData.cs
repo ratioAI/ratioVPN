@@ -75,6 +75,29 @@ internal sealed class DemoData : IDisposable
         Options = new ShellOptions(_ => Snapshot, QueryAutostart: false, EnableIpChecks: false, Stats: Stats);
     }
 
+    /// <summary>Nur Vorschau: Latenzen, Live-Kurven und Ereignisse wie im echten Betrieb.</summary>
+    public void Decorate(MainViewModel vm)
+    {
+        for (int i = 0; i < Tunnels.Count; i++) Tunnels[i].SetHandshakeRttForTest(TimeSpan.FromMilliseconds(16 + i * 3 % 19));
+        vm.RefreshFast();
+        var rates = new[] { "↓ 86.4 KB/s   ↑ 9.1 KB/s", "↓ 41.0 KB/s   ↑ 4.7 KB/s", "↓ 132.8 KB/s   ↑ 15.2 KB/s" };
+        int n = 0;
+        foreach (var tile in vm.Cockpit.Tiles.ToList())
+        {
+            var wave = Enumerable.Range(0, 60).Select(x =>
+                40_000 + 25_000 * Math.Sin((x + n * 9) / 5.0) + 12_000 * Math.Sin((x + n * 4) / 1.7) + (x % (17 + n * 3) == 0 ? 60_000 : 0)).ToArray();
+            vm.Cockpit.SeedHistory(tile.Key, wave, rates[n % rates.Length]);
+            n++;
+        }
+        var now = DateTime.Now;
+        vm.Cockpit.AddEvent(new AutoPilotEvent(now.AddMinutes(-94), "Minecraft* 26.2 (Prozess 18368): neu erkannt → ratioAI1-DE-571", false, AutoPilotEventKind.Assigned));
+        vm.Cockpit.AddEvent(new AutoPilotEvent(now.AddMinutes(-61), "Verbindung wg-DE-671 antwortet nicht mehr", false, AutoPilotEventKind.TunnelDown));
+        vm.Cockpit.AddEvent(new AutoPilotEvent(now.AddMinutes(-61), "Minecraft* 26.2 | NRC 26.2 (Prozess 26204): wg-DE-671 ausgefallen → gewechselt auf wg-DE-275", true, AutoPilotEventKind.Switched));
+        vm.Cockpit.AddEvent(new AutoPilotEvent(now.AddMinutes(-33), "wg-DE-820 und wg-DE-796 haben dieselbe öffentliche IP 185.107.56.77 – werden nicht gleichzeitig für getrennte Programme genutzt", true, AutoPilotEventKind.DuplicateIp));
+        vm.Cockpit.AddEvent(new AutoPilotEvent(now.AddMinutes(-7), "Minecraft* 26.2 - Multiplayer (Prozess 33348): keine Verbindung mehr zum Server (gekickt?)", true, AutoPilotEventKind.Kicked));
+        vm.Cockpit.AddEvent(new AutoPilotEvent(now.AddMinutes(-6), "Minecraft* 26.2 - Multiplayer (Prozess 33348): wieder verbunden", true, AutoPilotEventKind.Reconnected));
+    }
+
     private static void FillStats(StatsStore store)
     {
         var rnd = new Random(7);

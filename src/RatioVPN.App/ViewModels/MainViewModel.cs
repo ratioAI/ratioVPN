@@ -86,6 +86,9 @@ public sealed class MainViewModel : ObservableObject
     // ---------------- Automatik ----------------
 
     public AutoPilot AutoPilot { get; }
+    public CockpitViewModel Cockpit { get; }
+    /// <summary>Seitenwechsel aus Knöpfen (Parameter: Seitenname, z. B. "Automatik").</summary>
+    public ICommand NavigateCommand { get; }
     private readonly DiscordNotifier _discord;
 
     public ObservableCollection<string> History { get; } = new();
@@ -166,6 +169,7 @@ public sealed class MainViewModel : ObservableObject
         Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
         {
             History.Insert(0, $"{e.Time:dd.MM. HH:mm:ss}   {e.Message}");
+            Cockpit.AddEvent(e);
             while (History.Count > 40) History.RemoveAt(History.Count - 1);
             Raise(nameof(HasHistory));
         }));
@@ -196,6 +200,12 @@ public sealed class MainViewModel : ObservableObject
         _options = options ?? ShellOptions.Default;
         Controller = controller;
         AutoPilot = new AutoPilot(controller);
+        Cockpit = new CockpitViewModel(this);
+        NavigateCommand = new RelayCommand(p =>
+        {
+            if (p is Page page) CurrentPage = page;
+            else if (p is string name && Enum.TryParse<Page>(name, out var parsed)) CurrentPage = parsed;
+        });
         _discord = new DiscordNotifier(() => Controller.Settings.AutoPilot.DiscordWebhookUrl);
         TestDiscordCommand = new RelayCommand(async _ => await TestDiscord());
         AutoPilot.EventRaised += OnAutoPilotEvent;
@@ -481,6 +491,7 @@ public sealed class MainViewModel : ObservableObject
             ? "Noch keine Verbindung – importiere eine WireGuard-Datei"
             : $"{connected} von {Tunnels.Count} Verbindungen aktiv · {assigned} Programm(e) über VPN";
         UpdateShellStatus(connected);
+        Cockpit.Refresh(_lastSnapshot);
     }
 
     // ---------------- Kopf / Seitenleiste ----------------

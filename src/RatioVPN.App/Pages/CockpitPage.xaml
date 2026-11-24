@@ -1,19 +1,170 @@
 <UserControl x:Class="RatioVPN.App.Pages.CockpitPage"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <!-- Übergang: Verlauf; Kacheln folgen (Task 16). -->
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:RatioVPN.App">
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
-        <Border Style="{StaticResource Card}" VerticalAlignment="Top">
-            <StackPanel>
-                <TextBlock Text="Verlauf der Automatik" Style="{StaticResource H2}" Margin="0,0,0,6"/>
-                <ItemsControl ItemsSource="{Binding History}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" Text="{Binding}"/>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </StackPanel>
-        </Border>
+        <StackPanel Margin="0,0,0,18">
+
+            <!-- ============ Status-Banner ============ -->
+            <Border CornerRadius="16" BorderBrush="{StaticResource Line}" BorderThickness="1" Background="{StaticResource Surface}">
+                <Grid>
+                    <Border CornerRadius="16" Background="{StaticResource HeroGradient}"/>
+                    <Grid Margin="22,20">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid Width="64" Height="64">
+                            <Ellipse Fill="{Binding StatusSoftBrush}"/>
+                            <TextBlock Text="&#xEA18;" FontFamily="{StaticResource IconFont}" FontSize="30" Foreground="{Binding StatusBrush}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Grid>
+                        <StackPanel Grid.Column="1" Margin="18,0,12,0" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding StatusTitle}" FontFamily="{StaticResource DisplayFont}" FontSize="28" FontWeight="SemiBold"
+                                       Foreground="{Binding StatusBrush}"/>
+                            <TextBlock Text="{Binding StatusSubtitle}" Style="{StaticResource MutedText}" FontSize="13" Margin="0,2,0,0"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border CornerRadius="12" Padding="14,10" Margin="8,0,0,0" MinWidth="104" Background="#0DFFFFFF">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Cockpit.AvgLatency}" FontSize="19" FontWeight="SemiBold" FontFamily="{StaticResource DisplayFont}"/>
+                                    <TextBlock Text="Ø Latenz" Style="{StaticResource MutedText}" FontSize="11"/>
+                                </StackPanel>
+                            </Border>
+                            <Border CornerRadius="12" Padding="14,10" Margin="8,0,0,0" MinWidth="104" Background="#0DFFFFFF">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Cockpit.DataSinceStart}" FontSize="19" FontWeight="SemiBold" FontFamily="{StaticResource DisplayFont}"/>
+                                    <TextBlock Text="Daten seit Start" Style="{StaticResource MutedText}" FontSize="11"/>
+                                </StackPanel>
+                            </Border>
+                            <Border CornerRadius="12" Padding="14,10" Margin="8,0,0,0" MinWidth="104" Background="#0DFFFFFF">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Cockpit.Failures24h}" FontSize="19" FontWeight="SemiBold" FontFamily="{StaticResource DisplayFont}"/>
+                                    <TextBlock Text="Ausfälle 24 h" Style="{StaticResource MutedText}" FontSize="11"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <!-- ============ Kacheln ============ -->
+            <TextBlock Text="GESCHÜTZTE PROGRAMME" Style="{StaticResource SectionTitle}"/>
+
+            <Border Style="{StaticResource Card}" Padding="22,20"
+                    Visibility="{Binding Cockpit.HasTiles, Converter={StaticResource InverseBoolToVis}}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource Icon}" Text="&#xE945;" FontSize="28" Foreground="{StaticResource AccentHover}" Margin="0,0,18,0"/>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="Gerade läuft nichts über das VPN" Style="{StaticResource H2}"/>
+                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" FontSize="12.5" Margin="0,4,0,12"
+                                   Text="Starte ein Programm, das zu einer Automatik-Regel passt (z. B. Minecraft), oder gib einem Programm fest eine Verbindung."/>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="Automatik ansehen" Style="{StaticResource PrimaryButton}" Command="{Binding NavigateCommand}" CommandParameter="Automatik"/>
+                            <Button Content="Programm zuweisen" Style="{StaticResource BaseButton}" Margin="8,0,0,0" Command="{Binding NavigateCommand}" CommandParameter="Programs"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <ItemsControl ItemsSource="{Binding Cockpit.Tiles}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type local:InstanceTile}">
+                        <Border x:Name="tile" Style="{StaticResource CardHover}" Width="420" Margin="0,0,12,12" Padding="16,14">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="40" Height="40" CornerRadius="10" Background="{StaticResource Surface2}">
+                                        <Grid>
+                                            <TextBlock Style="{StaticResource Icon}" Text="&#xE7FC;" HorizontalAlignment="Center" Foreground="{StaticResource Faint}"/>
+                                            <Image Source="{Binding Icon}" Width="26" Height="26" RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        </Grid>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="12,0,8,0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Title}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                            <local:StatusDot Fill="{Binding StatusBrush}" IsPulsing="{Binding IsPulsing}" Diameter="7" Margin="-2,0,2,0"/>
+                                            <TextBlock Text="{Binding TunnelName}" FontSize="12.5"/>
+                                            <TextBlock Text="  ·  " Style="{StaticResource MutedText}"/>
+                                            <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" FontSize="12"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <Border Grid.Column="2" Style="{StaticResource Badge}" VerticalAlignment="Top">
+                                        <TextBlock Text="{Binding Badge}" FontSize="11" Foreground="{StaticResource Muted}"/>
+                                    </Border>
+                                </Grid>
+
+                                <UniformGrid Columns="3" Margin="0,14,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="LATENZ" Style="{StaticResource MutedText}" FontSize="10" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding Latency}" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                    <StackPanel>
+                                        <TextBlock Text="ÖFFENTLICHE IP" Style="{StaticResource MutedText}" FontSize="10" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding PublicIp}" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,0" FontFamily="{StaticResource MonoFont}"/>
+                                    </StackPanel>
+                                    <StackPanel>
+                                        <TextBlock Text="LAUFZEIT" Style="{StaticResource MutedText}" FontSize="10" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding Since}" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                </UniformGrid>
+
+                                <Border Height="48" CornerRadius="8" Background="#07FFFFFF" ClipToBounds="True">
+                                    <local:Sparkline Values="{Binding History}" Stroke="{StaticResource AccentHover}" Fill="{StaticResource SparkFill}" Margin="0,4,0,0"/>
+                                </Border>
+                                <TextBlock Text="{Binding Rate}" Style="{StaticResource MutedText}" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <DataTemplate.Triggers>
+                            <DataTrigger Binding="{Binding IsDimmed}" Value="True">
+                                <Setter TargetName="tile" Property="Opacity" Value="0.55"/>
+                            </DataTrigger>
+                        </DataTemplate.Triggers>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- ============ Ereignisse ============ -->
+            <TextBlock Text="LETZTE EREIGNISSE" Style="{StaticResource SectionTitle}" Margin="2,6,0,8"/>
+            <Border Style="{StaticResource Card}" Padding="16,10" Margin="0,0,12,0">
+                <Grid>
+                    <TextBlock Text="Noch keine Ereignisse – hier erscheinen Wechsel, Ausfälle und Kicks." Style="{StaticResource MutedText}" Margin="0,4"
+                               Visibility="{Binding Cockpit.Events.Count, Converter={StaticResource CountToVis}, ConverterParameter=0}"/>
+                    <ItemsControl ItemsSource="{Binding Cockpit.Events}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type local:EventItem}">
+                                <Grid Margin="0,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="26" Height="26" CornerRadius="8" Background="#0DFFFFFF" VerticalAlignment="Top">
+                                        <TextBlock Text="{Binding Glyph}" FontFamily="{StaticResource IconFont}" FontSize="12" Foreground="{Binding Brush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <TextBlock Grid.Column="1" Text="{Binding Message}" TextWrapping="Wrap" FontSize="12.5" Margin="12,4,12,0"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding TimeText}" Style="{StaticResource MutedText}" Margin="0,4,0,0"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Grid>
+            </Border>
+        </StackPanel>
     </ScrollViewer>
 </UserControl>

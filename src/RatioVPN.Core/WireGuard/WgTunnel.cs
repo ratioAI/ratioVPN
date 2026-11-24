@@ -161,6 +161,9 @@ public sealed class WgTunnel : IDisposable
         }
     }
 
+    /// <summary>Nur für Tests/Vorschau: Handshake-Laufzeit setzen.</summary>
+    internal void SetHandshakeRttForTest(TimeSpan rtt) => LastHandshakeRtt = rtt;
+
     /// <summary>Nur für Tests/Messungen: liefert ein entschlüsseltes Paket, als käme es vom Server.</summary>
     internal void RaisePacketReceivedForTest(byte[] buf, int len) => PacketReceived?.Invoke(this, buf, len);
 

@@ -39,6 +39,11 @@
             <GradientStop Color="#00000000" Offset="1"/>
         </LinearGradientBrush>
 
+        <LinearGradientBrush x:Key="SparkFill" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#557C6CFF" Offset="0"/>
+            <GradientStop Color="#003EC6FF" Offset="1"/>
+        </LinearGradientBrush>
+
         <FontFamily x:Key="UiFont">Segoe UI Variable Text, Segoe UI</FontFamily>
         <FontFamily x:Key="DisplayFont">Segoe UI Variable Display, Segoe UI</FontFamily>
         <FontFamily x:Key="IconFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
