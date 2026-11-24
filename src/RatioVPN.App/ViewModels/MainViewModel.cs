@@ -87,6 +87,7 @@ public sealed class MainViewModel : ObservableObject
 
     public AutoPilot AutoPilot { get; }
     public CockpitViewModel Cockpit { get; }
+    public RulesViewModel Rules { get; }
     /// <summary>Prüft öffentliche IPs (null in der Vorschau).</summary>
     public IpCheckScheduler? IpChecks { get; }
     public ICommand CheckAllIpsCommand { get; }
@@ -120,25 +121,14 @@ public sealed class MainViewModel : ObservableObject
         set { Controller.Settings.AutoPilot.Enabled = value; Controller.SaveSettings(); Raise(); }
     }
 
-    private string _patternError = "";
-    public string PatternError { get => _patternError; private set => Set(ref _patternError, value); }
-
-    public string AutoPilotPattern
+    /// <summary>Nach so vielen Sekunden ohne Antwort gilt eine Verbindung als ausgefallen (10–300).</summary>
+    public int FailAfterSeconds
     {
-        get => Controller.Settings.AutoPilot.TitlePattern;
+        get => Controller.Settings.AutoPilot.FailAfterSeconds;
         set
         {
-            try
-            {
-                _ = new Regex(value ?? "");
-                PatternError = "";
-                Controller.Settings.AutoPilot.TitlePattern = value ?? "";
-                Controller.SaveSettings();
-            }
-            catch (ArgumentException)
-            {
-                PatternError = "Ungültiges Muster – wird nicht übernommen.";
-            }
+            Controller.Settings.AutoPilot.FailAfterSeconds = Math.Clamp(value, 10, 300);
+            Controller.SaveSettings();
             Raise();
         }
     }
@@ -175,6 +165,7 @@ public sealed class MainViewModel : ObservableObject
             _lastSnapshot = _options.Scan(AutoPilot.ProcessExeNames);
             AutoPilot.Step(_lastSnapshot);
             IpChecks?.Tick();
+            Rules.Refresh(_lastSnapshot);
         }
         catch (Exception ex)
         {
@@ -221,6 +212,7 @@ public sealed class MainViewModel : ObservableObject
         Controller = controller;
         AutoPilot = new AutoPilot(controller);
         Cockpit = new CockpitViewModel(this);
+        Rules = new RulesViewModel(this);
         NavigateCommand = new RelayCommand(p =>
         {
             if (p is Page page) CurrentPage = page;
