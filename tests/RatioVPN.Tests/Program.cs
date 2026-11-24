@@ -824,6 +824,16 @@ Console.WriteLine("Öffentliche IPs prüfen und Doppel-IP-Schutz:");
     try { Directory.Delete(dir, true); } catch { }
 }
 
+// ---------------------------------------------------------------- Autostart-Aufgabe
+Console.WriteLine("Autostart-Aufgabe (Aufgabenplanung):");
+{
+    const string taskXml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
+        + "  <Actions Context=\"Author\">\n    <Exec>\n      <Command>\"C:\\Users\\x\\Downloads\\RatioVPN2\\publish\\RatioVPN.exe\"</Command>\n"
+        + "      <Arguments>--minimized</Arguments>\n    </Exec>\n  </Actions>\n</Task>";
+    Check("Aufgaben-XML: Programmpfad wird gelesen", RatioVPN.Core.Windows.TaskXml.CommandPath(taskXml) == @"C:\Users\x\Downloads\RatioVPN2\publish\RatioVPN.exe");
+    Check("Kaputtes XML → null", RatioVPN.Core.Windows.TaskXml.CommandPath("<Task><Actions>") == null && RatioVPN.Core.Windows.TaskXml.CommandPath("") == null);
+}
+
 static Process StartSleeper()
 {
     var exe = Environment.ProcessPath!;

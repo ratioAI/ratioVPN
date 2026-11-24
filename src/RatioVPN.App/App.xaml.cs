@@ -97,6 +97,14 @@ public partial class App : Application
             Log(ex.ToString());
         }
 
+        // Nach dem Umstieg auf eine neue Version: Autostart auf diese exe umstellen (im Hintergrund, blockiert den Start nicht).
+        var self = Environment.ProcessPath;
+        if (self != null)
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                if (AutostartTask.IsEnabled() && AutostartTask.EnsurePointsTo(self)) Log("Autostart zeigt jetzt auf " + self);
+            });
+
         var vm = new MainViewModel(_controller) { Banner = banner ?? "" };
         _window = new MainWindow(vm);
         _window.Closing += (_, args) =>

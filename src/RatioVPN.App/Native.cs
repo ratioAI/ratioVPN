@@ -221,6 +221,28 @@ public static class AutostartTask
         catch { return false; }
     }
 
+    /// <summary>
+    /// Zeigt der Autostart auf eine andere exe (z. B. nach dem Umstieg auf eine neue Version), wird er auf
+    /// diese exe umgestellt. true = umgestellt. Fehler werden geschluckt (nie Absturz beim Start).
+    /// </summary>
+    public static bool EnsurePointsTo(string exePath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{TaskName}\" /XML")
+            { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+            using var p = Process.Start(psi)!;
+            var xml = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+            if (p.ExitCode != 0) return false;
+            var current = RatioVPN.Core.Windows.TaskXml.CommandPath(xml);
+            if (current == null) return false;
+            if (string.Equals(Path.GetFullPath(current), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase)) return false;
+            return Set(true);
+        }
+        catch { return false; }
+    }
+
     public static bool Set(bool enabled)
     {
         try
