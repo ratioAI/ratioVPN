@@ -52,6 +52,38 @@
                 </Grid>
             </Border>
             <Border Style="{StaticResource Card}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource Icon}" Text="&#xE7E7;" FontSize="18" Margin="0,0,14,0" VerticalAlignment="Top" Foreground="{StaticResource AccentHover}"/>
+                    <StackPanel Grid.Column="1" Margin="0,0,16,0">
+                        <TextBlock Text="Hinweise bei wichtigen Ereignissen" Style="{StaticResource H2}"/>
+                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,3,0,0" FontSize="12.5"
+                                   Text="Zeigt eine Meldung neben der Uhr, wenn die Automatik wechselt, blockiert, einen Kick erkennt oder das Internet weg ist – nur solange das Fenster geschlossen ist."/>
+                    </StackPanel>
+                    <CheckBox Grid.Column="2" Style="{StaticResource Switch}" IsChecked="{Binding NotifyImportant}" VerticalAlignment="Center"/>
+                </Grid>
+            </Border>
+            <Border Style="{StaticResource Card}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource Icon}" Text="&#xE921;" FontSize="18" Margin="0,0,14,0" VerticalAlignment="Top" Foreground="{StaticResource AccentHover}"/>
+                    <StackPanel Grid.Column="1" Margin="0,0,16,0">
+                        <TextBlock Text="Minimiert starten" Style="{StaticResource H2}"/>
+                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,3,0,0" FontSize="12.5"
+                                   Text="Ratio VPN startet direkt im Infobereich, ohne Fenster."/>
+                    </StackPanel>
+                    <CheckBox Grid.Column="2" Style="{StaticResource Switch}" IsChecked="{Binding StartMinimized}" VerticalAlignment="Center"/>
+                </Grid>
+            </Border>
+            <Border Style="{StaticResource Card}">
                 <StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                         <TextBlock Style="{StaticResource Icon}" Text="&#xE946;" FontSize="16" Margin="0,0,10,0" Foreground="{StaticResource AccentHover}"/>
@@ -70,8 +102,23 @@
                     </TextBlock>
                 </StackPanel>
             </Border>
-            <TextBlock Style="{StaticResource MutedText}" Margin="4,6,0,0" TextWrapping="Wrap"
-                       Text="Ratio VPN 2.0 · WireGuard® ist eine eingetragene Marke von Jason A. Donenfeld · Paketumleitung: WinDivert (LGPL)"/>
+            <StackPanel Orientation="Horizontal" Margin="2,4,0,0">
+                <Button Style="{StaticResource BaseButton}" Command="{Binding OpenLogCommand}" Padding="12,6">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE9F9;" FontSize="12" Foreground="{StaticResource Text}" Margin="0,0,8,0"/>
+                        <TextBlock Text="Protokoll öffnen"/>
+                    </StackPanel>
+                </Button>
+                <Button Style="{StaticResource BaseButton}" Command="{Binding OpenDataFolderCommand}" Padding="12,6" Margin="8,0,0,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE838;" FontSize="12" Foreground="{StaticResource Text}" Margin="0,0,8,0"/>
+                        <TextBlock Text="Datenordner öffnen"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+            <TextBlock Style="{StaticResource MutedText}" Margin="4,12,0,0" TextWrapping="Wrap">
+                <Run Text="{Binding VersionText, Mode=OneWay}"/><Run Text=" · WireGuard® ist eine eingetragene Marke von Jason A. Donenfeld · Paketumleitung: WinDivert (LGPL)"/>
+            </TextBlock>
         </StackPanel>
     </ScrollViewer>
 </UserControl>

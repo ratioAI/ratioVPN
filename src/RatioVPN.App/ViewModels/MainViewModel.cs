@@ -89,6 +89,38 @@ public sealed class MainViewModel : ObservableObject
     public AutoPilot AutoPilot { get; }
     public CockpitViewModel Cockpit { get; }
     public RulesViewModel Rules { get; }
+
+    /// <summary>Status für das Symbol im Infobereich (nur bei Änderung).</summary>
+    public event Action<TrayStatus, string>? TrayStatusChanged;
+    /// <summary>Wichtiges Ereignis als Hinweis zeigen (die App entscheidet, ob das Fenster gerade sichtbar ist).</summary>
+    public event Action<string, string>? NotifyRequested;
+    private (TrayStatus, string)? _lastTray;
+
+    public bool NotifyImportant
+    {
+        get => Controller.Settings.Ui.NotifyImportant;
+        set { Controller.Settings.Ui.NotifyImportant = value; Controller.SaveSettings(); Raise(); }
+    }
+
+    public bool StartMinimized
+    {
+        get => Controller.Settings.StartMinimized;
+        set { Controller.Settings.StartMinimized = value; Controller.SaveSettings(); Raise(); }
+    }
+
+    public string VersionText => $"Ratio VPN {typeof(MainViewModel).Assembly.GetName().Version?.ToString(3)}";
+    public ICommand OpenLogCommand { get; } = new RelayCommand(_ => OpenPath(App.LogPath));
+    public ICommand OpenDataFolderCommand { get; } = new RelayCommand(_ => OpenPath(Path.GetDirectoryName(App.LogPath)!));
+
+    private static void OpenPath(string path)
+    {
+        try
+        {
+            if (!File.Exists(path) && !Directory.Exists(path)) return;
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch { }
+    }
     public StatsViewModel Stats { get; }
     private readonly DispatcherTimer _trafficTimer;
     private readonly Dictionary<string, (long Rx, long Tx)> _lastTraffic = new();
@@ -201,6 +233,7 @@ public sealed class MainViewModel : ObservableObject
             History.Insert(0, $"{e.Time:dd.MM. HH:mm:ss}   {e.Message}");
             Cockpit.AddEvent(e);
             _options.Stats?.Add(new RatioVPN.Core.Stats.StatEvent(e.Time, e.Kind, e.TunnelName, null, e.Message));
+            if (e.Important && NotifyImportant) NotifyRequested?.Invoke("Ratio VPN – Automatik", e.Message);
             while (History.Count > 40) History.RemoveAt(History.Count - 1);
             Raise(nameof(HasHistory));
         }));
@@ -595,6 +628,18 @@ public sealed class MainViewModel : ObservableObject
             : ProtectedCount > 0 ? ("Geschützt", Palette.Green, Palette.GreenSoft)
             : ("Bereit", Palette.Accent, Palette.AccentSoft);
         StatusPulsing = connecting || blocked > 0;
+        var tray = (StatusTitle switch
+        {
+            "Geschützt" => TrayStatus.Ok,
+            "Achtung" => TrayStatus.Warning,
+            "Internet weg" => TrayStatus.Error,
+            _ => TrayStatus.Idle,
+        }, $"Ratio VPN – {StatusTitle}\n{ProtectedCount} geschützt · {connected}/{Tunnels.Count} Verbindungen");
+        if (_lastTray != tray)
+        {
+            _lastTray = tray;
+            TrayStatusChanged?.Invoke(tray.Item1, tray.Item2);
+        }
         StatusSubtitle = Tunnels.Count == 0
             ? "Importiere eine WireGuard-Datei"
             : $"{ProtectedCount} geschützt · {reserves} {(reserves == 1 ? "Reserve" : "Reserven")} bereit";

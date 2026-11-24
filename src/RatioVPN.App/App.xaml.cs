@@ -123,7 +123,10 @@ public partial class App : Application
             }
         };
 
-        _tray = new TrayIcon(ShowWindow, ExitApp);
+        _tray = new TrayIcon(ShowWindow, ExitApp, () => vm.AutoPilotEnabled, v => vm.AutoPilotEnabled = v);
+        vm.TrayStatusChanged += (status, tip) => _tray?.SetStatus(status, tip);
+        vm.NotifyRequested += (title, text) => { if (_window?.IsVisible != true) _tray?.Notify(title, text); };
+        vm.RefreshFast();
 
         bool minimized = e.Args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase)) || _controller.Settings.StartMinimized;
         if (!minimized || banner != null) _window.Show();
