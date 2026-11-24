@@ -764,6 +764,66 @@ Console.WriteLine("Automatik: Kick-Erkennung über Verkehr pro Prozess:");
     try { Directory.Delete(dir, true); } catch { }
 }
 
+// ---------------------------------------------------------------- IP-Prüfung + Doppel-IP
+Console.WriteLine("Öffentliche IPs prüfen und Doppel-IP-Schutz:");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "settings.json")), new PlainProtector(), new FakeLookup(), null);
+    c.Start();
+    var t4 = new[] { "A", "B", "C", "D" }.Select(n => c.ImportConfig(n + ".conf", TestConf())).ToArray();
+    foreach (var t in t4) { t.Start(); t.ForceStateForTest(TunnelState.Connected); }
+    var ap = new AutoPilot(c);
+    var events = new List<AutoPilotEvent>();
+    ap.EventRaised += events.Add;
+
+    var calls = new ConcurrentDictionary<string, int>();
+    var ips = new Dictionary<string, string> { [t4[0].Id] = "5.5.5.5", [t4[1].Id] = "5.5.5.5", [t4[2].Id] = "6.6.6.6" };
+    Task<string> FakeCheck(string id, CancellationToken _)
+    {
+        calls.AddOrUpdate(id, 1, (_, n) => n + 1);
+        return ips.TryGetValue(id, out var ip) ? Task.FromResult(ip) : Task.FromException<string>(new InvalidOperationException("keine Antwort"));
+    }
+    var sched = new IpCheckScheduler(c, ap, FakeCheck, maxParallel: 2);
+    for (int i = 0; i < 4; i++) sched.Tick();
+    Check("Jede Verbindung wird pro Sitzung einmal geprüft", t4.All(t => calls.GetValueOrDefault(t.Id) == 1), string.Join(",", calls.Values));
+    Check("Geprüfte IP wird an der Verbindung gespeichert",
+        c.Settings.Tunnels.First(t => t.Id == t4[2].Id).LastPublicIp == "6.6.6.6" && c.Settings.Tunnels.First(t => t.Id == t4[2].Id).LastPublicIpAt != null);
+    Check("Fehlgeschlagene Prüfung wird nicht als IP gespeichert", c.Settings.Tunnels.First(t => t.Id == t4[3].Id).LastPublicIp == "");
+    Check("Gleiche IP zweier Verbindungen wird einmal gemeldet",
+        events.Count(e => e.Kind == AutoPilotEventKind.DuplicateIp) == 1 && events.First(e => e.Kind == AutoPilotEventKind.DuplicateIp).Important);
+
+    t4[3].ForceStateForTest(TunnelState.Error); // D aus dem Spiel nehmen: nur A, B, C bleiben
+    using var s1 = StartSleeper();
+    ap.Step(new[] { new WindowInfo(Environment.ProcessId, @"C:\Java\javaw.exe", "Minecraft* 26.2"), new WindowInfo(s1.Id, @"C:\Java\javaw.exe", "Minecraft* 26.2") });
+    var assigned = new[] { c.WindowRuleFor(Environment.ProcessId), c.WindowRuleFor(s1.Id) }.OrderBy(x => x).ToArray();
+    Check("Verbindungen mit gleicher IP werden nie gleichzeitig vergeben",
+        assigned.SequenceEqual(new[] { t4[0].Id, t4[2].Id }.OrderBy(x => x)), string.Join(",", assigned));
+
+    // Höchstens 2 gleichzeitig
+    var gates = new ConcurrentDictionary<string, TaskCompletionSource<string>>();
+    int active = 0, maxActive = 0;
+    async Task<string> SlowCheck(string id, CancellationToken _)
+    {
+        int now = Interlocked.Increment(ref active);
+        lock (gates) maxActive = Math.Max(maxActive, now);
+        try { return await gates.GetOrAdd(id, _ => new TaskCompletionSource<string>()).Task; }
+        finally { Interlocked.Decrement(ref active); }
+    }
+    foreach (var t in t4) t.ForceStateForTest(TunnelState.Connected);
+    var slow = new IpCheckScheduler(c, ap, SlowCheck, maxParallel: 2);
+    slow.Tick(); slow.Tick();
+    Check("Höchstens 2 Prüfungen gleichzeitig", gates.Count == 2 && maxActive == 2 && t4.Count(t => slow.IsChecking(t.Id)) == 2);
+    foreach (var g in gates.Values) g.TrySetResult("7.7.7.7");
+    var allDone = slow.CheckAllAsync();
+    foreach (var g in gates.Values) g.TrySetResult("7.7.7.7");
+    for (int i = 0; i < 50 && !allDone.IsCompleted; i++) { foreach (var g in gates.Values) g.TrySetResult("7.7.7.7"); Thread.Sleep(20); }
+    Check("Alle prüfen läuft durch", allDone.IsCompleted && t4.All(t => !slow.IsChecking(t.Id)));
+
+    foreach (var t in t4) t.Stop();
+    try { s1.Kill(); } catch { }
+    try { Directory.Delete(dir, true); } catch { }
+}
+
 static Process StartSleeper()
 {
     var exe = Environment.ProcessPath!;

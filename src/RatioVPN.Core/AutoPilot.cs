@@ -201,10 +201,11 @@ public sealed class AutoPilot
         var managedPids = instances.Select(i => i.Pid).ToHashSet();
 
         // Belegt sind Verbindungen aus Programm-Regeln und aus Regeln nicht verwalteter Prozesse.
-        var used = new HashSet<string>(_c.Settings.Rules.Select(r => r.TunnelId));
+        var used = new HashSet<string>();
+        foreach (var r in _c.Settings.Rules) MarkUsed(used, r.TunnelId);
         foreach (var r in _c.Settings.WindowRules)
         {
-            if (!managedPids.Contains(r.Pid) && IsTunnelId(r.TunnelId)) used.Add(r.TunnelId);
+            if (!managedPids.Contains(r.Pid) && IsTunnelId(r.TunnelId)) MarkUsed(used, r.TunnelId);
         }
 
         var units = BuildUnits(instances);
@@ -224,7 +225,7 @@ public sealed class AutoPilot
         {
             if (u.Current != null && IsTunnelId(u.Current) && !used.Contains(u.Current) && !IsFailed(u.Current))
             {
-                used.Add(u.Current);
+                MarkUsed(used, u.Current);
                 foreach (var m in u.Members)
                 {
                     if (_c.WindowRuleFor(m.Pid) != u.Current)
@@ -257,7 +258,7 @@ public sealed class AutoPilot
 
             if (free != null)
             {
-                used.Add(free.Id);
+                MarkUsed(used, free.Id);
                 foreach (var m in u.Members)
                 {
                     var mine = _c.WindowRuleFor(m.Pid);
@@ -276,7 +277,7 @@ public sealed class AutoPilot
             else if (failed)
             {
                 // Ausgefallene Verbindung behalten (kein Internet, keine echte IP), bis eine Reserve frei wird.
-                used.Add(cur!);
+                MarkUsed(used, cur!);
                 foreach (var m in u.Members)
                 {
                     if (_c.WindowRuleFor(m.Pid) != cur) _c.AssignWindow(m.Pid, m.ExePath, m.Title, cur);
@@ -470,6 +471,35 @@ public sealed class AutoPilot
     }
 
     private static bool IsTunnelId(string? v) => !string.IsNullOrEmpty(v) && v != Block;
+
+    /// <summary>Belegt eine Verbindung – und alle mit derselben öffentlichen IP (sonst wären Programme nur scheinbar getrennt).</summary>
+    private void MarkUsed(HashSet<string> used, string tunnelId)
+    {
+        used.Add(tunnelId);
+        var ip = _c.Settings.Tunnels.FirstOrDefault(t => t.Id == tunnelId)?.LastPublicIp;
+        if (string.IsNullOrEmpty(ip)) return;
+        foreach (var t in _c.Settings.Tunnels)
+            if (t.LastPublicIp == ip) used.Add(t.Id);
+    }
+
+    private readonly HashSet<string> _reportedDuplicates = new();
+
+    /// <summary>Ergebnis einer IP-Prüfung: speichern und doppelte IPs (einmal je Paar und IP) melden.</summary>
+    public void ReportPublicIp(string tunnelId, string ip)
+    {
+        var entry = _c.Settings.Tunnels.FirstOrDefault(t => t.Id == tunnelId);
+        if (entry == null || string.IsNullOrWhiteSpace(ip)) return;
+        entry.LastPublicIp = ip;
+        entry.LastPublicIpAt = _clock();
+        _c.SaveSettings();
+        foreach (var other in _c.Settings.Tunnels.Where(t => t.Id != tunnelId && t.LastPublicIp == ip))
+        {
+            var key = string.Join("|", new[] { tunnelId, other.Id }.OrderBy(x => x, StringComparer.Ordinal)) + "|" + ip;
+            if (!_reportedDuplicates.Add(key)) continue;
+            Raise($"{entry.Name} und {other.Name} haben dieselbe öffentliche IP {ip} – werden nicht gleichzeitig für getrennte Programme genutzt",
+                true, AutoPilotEventKind.DuplicateIp, tunnelId);
+        }
+    }
 
     private string TunnelName(string id) => _c.GetTunnel(id)?.Name ?? "gelöschte Verbindung";
 
