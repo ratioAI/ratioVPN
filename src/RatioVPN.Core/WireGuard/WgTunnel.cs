@@ -139,6 +139,22 @@ public sealed class WgTunnel : IDisposable
         return HandshakePendingFor is { } pending && pending > threshold;
     }
 
+    /// <summary>Nur für Tests/Messungen: setzt einen fertigen Schlüssel, als wäre der Handshake gelaufen.</summary>
+    internal void InstallKeypairForTest(Keypair kp)
+    {
+        lock (_lock)
+        {
+            _keypairs[kp.LocalIndex] = kp;
+            _current = kp;
+            _handshakeInProgress = false;
+            LastHandshake = DateTime.UtcNow;
+            SetState(TunnelState.Connected, null);
+        }
+    }
+
+    /// <summary>Nur für Tests/Messungen: liefert ein entschlüsseltes Paket, als käme es vom Server.</summary>
+    internal void RaisePacketReceivedForTest(byte[] buf, int len) => PacketReceived?.Invoke(this, buf, len);
+
     internal void ForceStateForTest(TunnelState state, bool handshakePending = false, TimeSpan? pendingFor = null)
     {
         lock (_lock)

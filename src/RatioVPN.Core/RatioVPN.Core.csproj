@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="RatioVPN.Tests" />
+    <InternalsVisibleTo Include="RatioVPN.Bench" />
   </ItemGroup>
 
 </Project>
