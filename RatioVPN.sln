@@ -13,6 +13,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{55087EE6
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RatioVPN.Bench", "tests\RatioVPN.Bench\RatioVPN.Bench.csproj", "{803F70EC-D40D-40B0-B13F-C4E21F18FCCA}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{57A99F9C-251B-4FE7-9A07-7664B492AF17}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RatioVPN.Preview", "tools\RatioVPN.Preview\RatioVPN.Preview.csproj", "{578860BC-2F58-4422-B9CD-64C7D0715C92}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -35,11 +39,16 @@ Global
 		{803F70EC-D40D-40B0-B13F-C4E21F18FCCA}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{803F70EC-D40D-40B0-B13F-C4E21F18FCCA}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{803F70EC-D40D-40B0-B13F-C4E21F18FCCA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{578860BC-2F58-4422-B9CD-64C7D0715C92}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{578860BC-2F58-4422-B9CD-64C7D0715C92}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{578860BC-2F58-4422-B9CD-64C7D0715C92}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{578860BC-2F58-4422-B9CD-64C7D0715C92}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{803F70EC-D40D-40B0-B13F-C4E21F18FCCA} = {55087EE6-1832-4C19-B479-838C0D8D0DAC}
+		{578860BC-2F58-4422-B9CD-64C7D0715C92} = {57A99F9C-251B-4FE7-9A07-7664B492AF17}
 	EndGlobalSection
 EndGlobal

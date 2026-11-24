@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Rendert die Oberfläche mit Demo-Daten als PNG. Läuft ohne Adminrechte, ohne Treiber, ohne echte Einstellungen. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <StartupObject>RatioVPN.Preview.Program</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RatioVPN.App\RatioVPN.App.csproj" />
+    <ProjectReference Include="..\..\src\RatioVPN.Core\RatioVPN.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -306,8 +306,28 @@ public sealed class TunnelItem : ObservableObject
     };
 }
 
+/// <summary>Seiten der Oberfläche.</summary>
+public enum Page { Cockpit, Programs, Automatik, Tunnels, Stats, Settings }
+
+/// <summary>
+/// Einstellbare Abhängigkeiten der Oberfläche. Standard = echtes System; das Vorschau-Werkzeug
+/// setzt Demo-Werte (kein Autostart-Abfragen, keine IP-Prüfungen, feste Fenster).
+/// </summary>
+public sealed record ShellOptions(
+    Func<IReadOnlyCollection<string>, SystemSnapshot> Scan,
+    bool QueryAutostart = true,
+    bool EnableIpChecks = true,
+    RatioVPN.Core.Stats.StatsStore? Stats = null)
+{
+    public static ShellOptions Default => new(SystemScanner.Take);
+}
+
 public sealed class MainViewModel : ObservableObject
 {
+    private readonly ShellOptions _options;
+
+    private Page _currentPage = Page.Programs;
+    public Page CurrentPage { get => _currentPage; set => Set(ref _currentPage, value); }
     public VpnController Controller { get; }
     public ObservableCollection<ProgramItem> Programs { get; } = new();
     public ObservableCollection<TunnelItem> Tunnels { get; } = new();
@@ -404,12 +424,11 @@ public sealed class MainViewModel : ObservableObject
                         ?? "Testnachricht gesendet – schau in Discord nach.";
     }
 
-    private void RunAutoPilot()
+    internal void RunAutoPilot()
     {
         try
         {
-            var windows = WindowEnumerator.GetOpenWindows().Select(w => new WindowInfo(w.Pid, w.ExePath, w.Title)).ToList();
-            AutoPilot.Step(windows);
+            AutoPilot.Step(_options.Scan(AutoPilot.ProcessExeNames));
         }
         catch (Exception ex)
         {
@@ -448,8 +467,9 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public MainViewModel(VpnController controller)
+    public MainViewModel(VpnController controller, ShellOptions? options = null)
     {
+        _options = options ?? ShellOptions.Default;
         Controller = controller;
         AutoPilot = new AutoPilot(controller);
         _discord = new DiscordNotifier(() => Controller.Settings.AutoPilot.DiscordWebhookUrl);
@@ -460,7 +480,7 @@ public sealed class MainViewModel : ObservableObject
         CheckIpCommand = new RelayCommand(async p => await CheckIp(p as TunnelItem), p => p is TunnelItem t && !t.CheckingIp);
         RemoveRuleCommand = new RelayCommand(p => { if (p is ProgramItem pi) pi.TunnelId = null; });
 
-        _autostart = AutostartTask.IsEnabled();
+        _autostart = _options.QueryAutostart && AutostartTask.IsEnabled();
 
         Controller.Changed += () => Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshFast));
 
@@ -630,7 +650,7 @@ public sealed class MainViewModel : ObservableObject
     public void RefreshPrograms()
     {
         List<OpenWindow> windows;
-        try { windows = WindowEnumerator.GetOpenWindows(); }
+        try { windows = _options.Scan(Array.Empty<string>()).Windows.Select(w => new OpenWindow(w.Pid, w.ExePath, w.Title)).ToList(); }
         catch { return; }
 
         // Pro Programm (exe) ein Eintrag; Fenstertitel des ersten Fensters anzeigen
@@ -728,7 +748,7 @@ public sealed class MainViewModel : ObservableObject
 
     // ---------------- Laufende Aktualisierung ----------------
 
-    private void RefreshFast()
+    internal void RefreshFast()
     {
         if (Tunnels.Count != Controller.Tunnels.Count) RebuildTunnels();
         foreach (var t in Tunnels) t.Refresh();

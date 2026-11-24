@@ -5,7 +5,7 @@
         Title="Ratio VPN" Width="900" Height="640" MinWidth="720" MinHeight="480"
         Background="{StaticResource Bg}" WindowStartupLocation="CenterScreen"
         AllowDrop="True" Drop="OnDrop" DragOver="OnDragOver"
-        Icon="pack://application:,,,/Assets/ratio.ico"
+        Icon="pack://application:,,,/RatioVPN;component/Assets/ratio.ico"
         TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
 
     <Grid Margin="24,18,24,16">

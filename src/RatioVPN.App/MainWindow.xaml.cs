@@ -29,7 +29,23 @@ public partial class MainWindow : Window
             if (DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int)) != 0)
                 DwmSetWindowAttribute(hwnd, 19, ref on, sizeof(int));
         };
-        if (vm.HasNoTunnels) TabTunnels.IsChecked = true;
+        if (vm.HasNoTunnels) vm.CurrentPage = Page.Tunnels;
+        SyncTabs();
+        vm.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(MainViewModel.CurrentPage)) SyncTabs(); };
+        TabPrograms.Checked += (_, _) => vm.CurrentPage = Page.Programs;
+        TabTunnels.Checked += (_, _) => vm.CurrentPage = Page.Tunnels;
+        TabSettings.Checked += (_, _) => vm.CurrentPage = Page.Settings;
+    }
+
+    /// <summary>Übergang bis zur neuen Navigation: Seiten auf die drei bisherigen Reiter abbilden.</summary>
+    private void SyncTabs()
+    {
+        switch (ViewModel.CurrentPage)
+        {
+            case Page.Tunnels: TabTunnels.IsChecked = true; break;
+            case Page.Settings: case Page.Automatik: TabSettings.IsChecked = true; break;
+            default: TabPrograms.IsChecked = true; break;
+        }
     }
 
     private void OnImport(object sender, RoutedEventArgs e)
@@ -67,10 +83,10 @@ public partial class MainWindow : Window
         if (confs.Count > 0)
         {
             ViewModel.ImportFiles(confs);
-            TabTunnels.IsChecked = true;
+            ViewModel.CurrentPage = Page.Tunnels;
         }
         foreach (var exe in exes) ViewModel.AddProgramManually(exe);
-        if (exes.Count > 0) TabPrograms.IsChecked = true;
+        if (exes.Count > 0) ViewModel.CurrentPage = Page.Programs;
     }
 
     private void OnNameKeyDown(object sender, KeyEventArgs e)
