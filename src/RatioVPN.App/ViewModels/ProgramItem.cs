@@ -45,14 +45,23 @@ public sealed class ProgramItem : ObservableObject
     /// <summary>Vom Nutzer über "Programm hinzufügen" gewählt (bleibt auch ohne Fenster in der Liste).</summary>
     public bool Manual { get; set; }
 
-    private string? _tunnelId;
-    /// <summary>Gewählte Verbindung (null = ohne VPN). Änderung durch den Nutzer wird sofort angewendet.</summary>
+    private string _tunnelId = "";
+    /// <summary>
+    /// Gewählte Verbindung ("" = ohne VPN – nicht null, sonst zeigt die Auswahl nichts an).
+    /// Änderung durch den Nutzer wird sofort angewendet.
+    /// </summary>
     public string? TunnelId
     {
         get => _tunnelId;
         set
         {
             if (_tunnelId == value) return;
+            if (value == null)
+            {
+                // WPF setzt beim Neuaufbau der Auswahlliste kurz null – keine Nutzeränderung.
+                Raise();
+                return;
+            }
             if (_owner.SuppressAssign)
             {
                 // Bei Neuaufbau der Auswahlliste setzt WPF kurz null – das ist keine Nutzeränderung.
@@ -69,14 +78,14 @@ public sealed class ProgramItem : ObservableObject
 
     public void SetTunnelSilently(string? id)
     {
-        _tunnelId = id;
+        _tunnelId = id ?? "";
         Raise(nameof(TunnelId));
         Raise(nameof(HasTunnel));
         Raise(nameof(Subtitle));
         RefreshStatus();
     }
 
-    public bool HasTunnel => _tunnelId != null;
+    public bool HasTunnel => _tunnelId.Length > 0;
 
     private Brush _statusBrush = Palette.Gray;
     public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }

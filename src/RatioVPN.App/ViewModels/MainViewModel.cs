@@ -87,6 +87,25 @@ public sealed class MainViewModel : ObservableObject
 
     public AutoPilot AutoPilot { get; }
     public CockpitViewModel Cockpit { get; }
+    /// <summary>Prüft öffentliche IPs (null in der Vorschau).</summary>
+    public IpCheckScheduler? IpChecks { get; }
+    public ICommand CheckAllIpsCommand { get; }
+    private bool _checkingAll;
+    public bool CheckingAll { get => _checkingAll; private set { if (Set(ref _checkingAll, value)) Raise(nameof(CheckAllText)); } }
+    public string CheckAllText => CheckingAll ? "Prüfe alle …" : "Alle IPs prüfen";
+
+    private async Task CheckAllIps()
+    {
+        if (IpChecks == null) return;
+        CheckingAll = true;
+        try { await IpChecks.CheckAllAsync(); }
+        finally
+        {
+            CheckingAll = false;
+            CommandManager.InvalidateRequerySuggested();
+            RefreshFast();
+        }
+    }
     /// <summary>Seitenwechsel aus Knöpfen (Parameter: Seitenname, z. B. "Automatik").</summary>
     public ICommand NavigateCommand { get; }
     private readonly DiscordNotifier _discord;
@@ -155,6 +174,7 @@ public sealed class MainViewModel : ObservableObject
             Controller.PruneWindowRules();
             _lastSnapshot = _options.Scan(AutoPilot.ProcessExeNames);
             AutoPilot.Step(_lastSnapshot);
+            IpChecks?.Tick();
         }
         catch (Exception ex)
         {
@@ -212,7 +232,11 @@ public sealed class MainViewModel : ObservableObject
         ToggleTunnelCommand =new RelayCommand(p => { if (p is TunnelItem t) { Controller.SetTunnelEnabled(t.Id, !t.Enabled); RefreshFast(); } });
         RemoveTunnelCommand = new RelayCommand(p => RemoveTunnel(p as TunnelItem));
         CheckIpCommand = new RelayCommand(async p => await CheckIp(p as TunnelItem), p => p is TunnelItem t && !t.CheckingIp);
-        RemoveRuleCommand = new RelayCommand(p => { if (p is ProgramItem pi) pi.TunnelId = null; });
+        RemoveRuleCommand = new RelayCommand(p => { if (p is ProgramItem pi) pi.TunnelId = ""; });
+        IpChecks = _options.EnableIpChecks
+            ? new IpCheckScheduler(controller, AutoPilot, (id, ct) => Controller.CheckPublicIpAsync(id, ct))
+            : null;
+        CheckAllIpsCommand = new RelayCommand(async _ => await CheckAllIps(), _ => IpChecks != null && !CheckingAll);
 
         _autostart = _options.QueryAutostart && AutostartTask.IsEnabled();
 
@@ -245,7 +269,7 @@ public sealed class MainViewModel : ObservableObject
         SuppressAssign = true;
         try
         {
-            var wanted = new List<(string? Id, string Name)> { (null, "Ohne VPN (direkt)") };
+            var wanted = new List<(string? Id, string Name)> { ("", "Ohne VPN (direkt)") };
             wanted.AddRange(Controller.Tunnels.Select(t => ((string?)t.Id, t.Name)));
 
             for (int i = Options.Count - 1; i >= 0; i--)
@@ -318,20 +342,22 @@ public sealed class MainViewModel : ObservableObject
     {
         if (t == null) return;
         t.CheckingIp = true;
-        t.PublicIp = "Prüfe…";
+        t.IpError = "";
+        t.Refresh();
         try
         {
             if (!Controller.IsEnabled(t.Id)) Controller.SetTunnelEnabled(t.Id, true);
             var ip = await Controller.CheckPublicIpAsync(t.Id);
-            t.PublicIp = $"Öffentliche IP: {ip}";
+            AutoPilot.ReportPublicIp(t.Id, ip); // speichern + Doppel-IP prüfen
         }
         catch (Exception ex)
         {
-            t.PublicIp = ex.Message;
+            t.IpError = ex.Message;
         }
         finally
         {
             t.CheckingIp = false;
+            t.Refresh();
             CommandManager.InvalidateRequerySuggested();
         }
     }

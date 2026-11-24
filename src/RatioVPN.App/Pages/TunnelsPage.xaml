@@ -8,20 +8,24 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <Grid Margin="0,0,8,12">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
+        <!-- Werkzeugleiste -->
+        <StackPanel Orientation="Horizontal" Margin="0,0,8,14">
             <Button Style="{StaticResource PrimaryButton}" Click="OnImport">
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Style="{StaticResource Icon}" Text="&#xE8B5;" FontSize="13" Foreground="White" Margin="0,0,8,0"/>
                     <TextBlock Text="WireGuard-Dateien importieren" Foreground="White"/>
                 </StackPanel>
             </Button>
-            <TextBlock Grid.Column="1" Style="{StaticResource MutedText}" VerticalAlignment="Center" Margin="14,0,0,0"
+            <Button Style="{StaticResource BaseButton}" Margin="8,0,0,0" Command="{Binding CheckAllIpsCommand}"
+                    ToolTip="Fragt über jede Verbindung die öffentliche IP ab und warnt, wenn zwei dieselbe haben">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Style="{StaticResource Icon}" Text="&#xE774;" FontSize="13" Foreground="{StaticResource Text}" Margin="0,0,8,0"/>
+                    <TextBlock Text="{Binding CheckAllText}"/>
+                </StackPanel>
+            </Button>
+            <TextBlock Style="{StaticResource MutedText}" VerticalAlignment="Center" Margin="14,0,0,0"
                        Text="oder .conf-Dateien einfach ins Fenster ziehen"/>
-        </Grid>
+        </StackPanel>
 
         <!-- Leerer Zustand -->
         <Border Grid.Row="1" Style="{StaticResource Card}" VerticalAlignment="Top" Padding="20,18" Margin="0,0,8,0"
@@ -42,49 +46,94 @@
             </StackPanel>
         </Border>
 
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
             <ItemsControl ItemsSource="{Binding Tunnels}" Margin="0,0,0,16">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type local:TunnelItem}">
-                        <Border Style="{StaticResource CardHover}">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                </Grid.RowDefinitions>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Orientation="Horizontal">
-                                    <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}" VerticalAlignment="Center" Margin="2,0,8,0"/>
-                                    <TextBox Style="{StaticResource InlineEdit}" MinWidth="120" MaxWidth="360"
-                                             Text="{Binding Name, UpdateSourceTrigger=LostFocus}" KeyDown="OnNameKeyDown"/>
-                                    <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" FontSize="13"
-                                               VerticalAlignment="Center" Margin="8,0,0,0"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Grid.RowSpan="2" Orientation="Horizontal" VerticalAlignment="Top">
-                                    <Button Content="IP prüfen" Style="{StaticResource BaseButton}" Margin="0,0,8,0"
-                                            Command="{Binding DataContext.CheckIpCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                            CommandParameter="{Binding}"/>
-                                    <Button Content="{Binding ToggleText}" Style="{StaticResource BaseButton}" Margin="0,0,8,0" MinWidth="96"
+                        <Border Style="{StaticResource CardHover}" Width="424" Margin="0,0,12,12" Padding="16,14">
+                            <StackPanel>
+                                <!-- Kopf: Status, Name, Aktionen -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <local:StatusDot Fill="{Binding StatusBrush}" IsPulsing="{Binding IsPulsing}" Diameter="9" Margin="-3,6,2,0" VerticalAlignment="Top"/>
+                                    <StackPanel Grid.Column="1" Margin="2,0,8,0">
+                                        <TextBox Style="{StaticResource InlineEdit}" HorizontalAlignment="Left" MinWidth="120" MaxWidth="250"
+                                                 Text="{Binding Name, UpdateSourceTrigger=LostFocus}" KeyDown="OnNameKeyDown"/>
+                                        <TextBlock Margin="2,0,0,0" FontSize="12">
+                                            <Run Text="{Binding StatusText, Mode=OneWay}" Foreground="{Binding StatusBrush, Mode=OneWay}"/>
+                                            <Run Text="  ·  " Foreground="{StaticResource Faint}"/>
+                                            <Run Text="{Binding Latency, Mode=OneWay}" Foreground="{StaticResource Muted}"/>
+                                        </TextBlock>
+                                    </StackPanel>
+                                    <Button Grid.Column="2" Content="{Binding ToggleText}" Style="{StaticResource BaseButton}" Padding="12,5" FontSize="12" VerticalAlignment="Top"
                                             Command="{Binding DataContext.ToggleTunnelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                             CommandParameter="{Binding}"/>
-                                    <Button Content="Entfernen" Style="{StaticResource GhostButton}"
-                                            Command="{Binding DataContext.RemoveTunnelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                </Grid>
+
+                                <!-- Öffentliche IP + Zuverlässigkeit -->
+                                <Grid Margin="0,12,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="ÖFFENTLICHE IP" Style="{StaticResource MutedText}" FontSize="10" FontWeight="SemiBold"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                            <TextBlock Text="{Binding PublicIp}" FontFamily="{StaticResource MonoFont}" FontSize="13.5"/>
+                                            <Border Style="{StaticResource Badge}" Background="{StaticResource WarningSoft}" Margin="8,0,0,0"
+                                                    Visibility="{Binding DuplicateIp, Converter={StaticResource BoolToVis}}"
+                                                    ToolTip="Eine andere Verbindung hat dieselbe öffentliche IP – beide werden nie gleichzeitig für getrennte Programme vergeben.">
+                                                <TextBlock Text="doppelt" FontSize="11" Foreground="{StaticResource Warning}"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="IP prüfen" Style="{StaticResource GhostButton}" FontSize="12" VerticalAlignment="Bottom"
+                                            Command="{Binding DataContext.CheckIpCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                             CommandParameter="{Binding}"/>
+                                </Grid>
+                                <TextBlock Text="{Binding IpError}" Foreground="{StaticResource Danger}" FontSize="11.5" TextWrapping="Wrap"
+                                           Visibility="{Binding IpError, Converter={StaticResource EmptyToCollapsed}}"/>
+
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Ellipse Width="7" Height="7" Fill="{Binding ReliabilityBrush}" Margin="0,1,7,0"/>
+                                    <TextBlock Text="{Binding Reliability}" FontSize="12" Foreground="{StaticResource Muted}"/>
                                 </StackPanel>
-                                <TextBlock Grid.Row="1" Style="{StaticResource MutedText}" Margin="22,4,0,0">
+
+                                <!-- Verkehr -->
+                                <Border Height="34" CornerRadius="8" Background="#07FFFFFF" ClipToBounds="True" Margin="0,10,0,0">
+                                    <local:Sparkline Values="{Binding History}" Stroke="{StaticResource AccentHover}" Fill="{StaticResource SparkFill}" Margin="0,3,0,0"/>
+                                </Border>
+                                <TextBlock Style="{StaticResource MutedText}" Margin="0,6,0,0">
+                                    <Run Text="{Binding Traffic, Mode=OneWay}"/><Run Text="   ·   "/><Run Text="{Binding Details, Mode=OneWay}"/>
+                                </TextBlock>
+                                <TextBlock Style="{StaticResource MutedText}" Margin="0,3,0,0">
                                     <Run Text="{Binding Endpoint, Mode=OneWay}"/><Run Text="  ·  Tunnel-IP "/><Run Text="{Binding Address, Mode=OneWay}"/>
                                 </TextBlock>
-                                <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Style="{StaticResource MutedText}" Margin="22,4,0,0">
-                                    <Run Text="{Binding Details, Mode=OneWay}"/><Run Text="     "/><Run Text="{Binding Traffic, Mode=OneWay}"/><Run Text="     "/><Run Text="{Binding PublicIp, Mode=OneWay}" Foreground="{StaticResource Text}"/>
-                                </TextBlock>
-                                <TextBlock Grid.Row="3" Grid.ColumnSpan="2" Style="{StaticResource MutedText}" Margin="22,4,0,0"
-                                           TextWrapping="Wrap" Text="{Binding Programs}"/>
-                            </Grid>
+
+                                <!-- Nutzung + Entfernen -->
+                                <Grid Margin="0,10,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding Programs}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                                               ToolTip="{Binding Programs}"/>
+                                    <Button Grid.Column="1" Style="{StaticResource DangerButton}" FontSize="12" Padding="8,4" ToolTip="Verbindung entfernen"
+                                            Command="{Binding DataContext.RemoveTunnelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                            CommandParameter="{Binding}">
+                                        <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="13"/>
+                                    </Button>
+                                </Grid>
+                            </StackPanel>
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
