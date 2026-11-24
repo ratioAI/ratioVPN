@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace RatioVPN.Core.Settings;
 
@@ -28,6 +29,23 @@ public sealed class AutoRuleEntry
     public AutoRuleMode Mode { get; set; } = AutoRuleMode.Separate;
     /// <summary>Melden, wenn eine Kopie keinen Verkehr mehr hat (z. B. vom Server gekickt).</summary>
     public bool WatchTraffic { get; set; }
+
+    public const string InvalidPatternText = "Ungültiges Muster – die Regel passt auf nichts.";
+
+    /// <summary>Fehlertext für ein ungültiges Titelmuster oder null (leer = Prozessregel, gültig).</summary>
+    public static string? CheckPattern(string pattern)
+    {
+        if (string.IsNullOrWhiteSpace(pattern)) return null;
+        try
+        {
+            _ = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return null;
+        }
+        catch (ArgumentException)
+        {
+            return InvalidPatternText;
+        }
+    }
 
     /// <summary>Bereinigte Liste der Programmdateien (klein geschrieben, ohne Leerstellen).</summary>
     public IReadOnlyList<string> ExeList() =>

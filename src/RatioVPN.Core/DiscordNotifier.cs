@@ -24,9 +24,13 @@ public sealed class DiscordNotifier : IDisposable
     public static bool IsValidUrl(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var u)
         && u.Scheme == "https"
-        && (u.Host.EndsWith("discord.com", StringComparison.OrdinalIgnoreCase)
-            || u.Host.EndsWith("discordapp.com", StringComparison.OrdinalIgnoreCase))
+        && (IsHostOrSubdomain(u.Host, "discord.com") || IsHostOrSubdomain(u.Host, "discordapp.com"))
         && u.AbsolutePath.StartsWith("/api/webhooks/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Genau diese Domain oder eine Subdomain davon (nicht „evildiscord.com“).</summary>
+    private static bool IsHostOrSubdomain(string host, string domain) =>
+        host.Equals(domain, StringComparison.OrdinalIgnoreCase)
+        || host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Meldung in die Warteschlange stellen (wird gebündelt gesendet).</summary>
     public void Post(string text) => _queue.Writer.TryWrite(text);

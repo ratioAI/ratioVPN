@@ -70,8 +70,15 @@ public sealed class MainViewModel : ObservableObject
     public string Search { get => _search; set { if (Set(ref _search, value)) RefreshPrograms(); } }
 
     private string _banner = "";
-    private string? _captureBanner;
-    public string Banner { get => _banner; set { if (Set(ref _banner, value)) Raise(nameof(HasBanner)); } }
+    private string _startupBanner = "";
+    /// <summary>Probleme beim Start (z. B. Verbindung nicht ladbar) – bleiben bis zum Neustart sichtbar.</summary>
+    public string StartupBanner
+    {
+        get => _startupBanner;
+        set { _startupBanner = value ?? ""; UpdateBanner(); }
+    }
+    public string Banner { get => _banner; private set { if (Set(ref _banner, value)) Raise(nameof(HasBanner)); } }
+    private void UpdateBanner() => Banner = BannerText.Compose(_startupBanner, Controller.CaptureError);
     public bool HasBanner => !string.IsNullOrEmpty(_banner);
 
     private string _summary = "";
@@ -580,9 +587,9 @@ public sealed class MainViewModel : ObservableObject
         UpdateShellStatus(connected);
         Cockpit.Refresh(_lastSnapshot);
 
-        // Fehler beim späteren Einschalten der Paketumleitung sichtbar machen (nie still schlucken)
-        if (Controller.CaptureError is { } err && Banner != err) { _captureBanner = err; Banner = err; }
-        else if (Controller.CaptureError == null && _captureBanner != null && Banner == _captureBanner) { _captureBanner = null; Banner = ""; }
+        // Fehler beim späteren Einschalten der Paketumleitung sichtbar machen (nie still schlucken),
+        // ohne die Probleme beim Start zu überschreiben
+        UpdateBanner();
         if (CurrentPage == Page.Stats && _sinceStatsRefresh.Elapsed > TimeSpan.FromSeconds(60))
         {
             _sinceStatsRefresh.Restart();

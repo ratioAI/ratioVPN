@@ -26,7 +26,7 @@ public static class LogBackfill
     public static int Import(string logPath, StatsStore store)
     {
         if (!File.Exists(logPath)) return 0;
-        int n = 0;
+        var found = new List<StatEvent>();
         foreach (var raw in File.ReadLines(logPath))
         {
             var m = LineRx.Match(raw);
@@ -35,10 +35,10 @@ public static class LogBackfill
             var text = m.Groups[2].Value;
             var e = Parse(time, text);
             if (e == null) continue;
-            store.Add(e);
-            n++;
+            found.Add(e);
         }
-        return n;
+        store.AddRange(found); // ein Schreibvorgang statt einer Dateiöffnung je Ereignis
+        return found.Count;
     }
 
     private static StatEvent? Parse(DateTime time, string text)

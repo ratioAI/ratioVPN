@@ -12,7 +12,8 @@ namespace RatioVPN.Preview;
 
 /// <summary>
 /// Rendert das Hauptfenster mit Demo-Daten seitenweise als PNG.
-/// Aufruf: RatioVPN.Preview.exe &lt;Ausgabeordner&gt; [--size=1180x760] [Seite …]
+/// Aufruf: RatioVPN.Preview.exe &lt;Ausgabeordner&gt; [--size=1180x760] [--probleme] [Seite …]
+/// --probleme: zusätzlich Regeln mit ungültigem und zu aufwendigem Muster und ein Start-Problem (Hinweisleiste).
 /// Startet NIE die echte App (kein App.Run, kein Mutex, kein Treiber, keine echten Einstellungen).
 /// </summary>
 internal static class Program
@@ -35,6 +36,7 @@ internal static class Program
             width = int.Parse(parts[0]);
             height = int.Parse(parts[1]);
         }
+        bool problems = args.Contains("--probleme");
         var pages = args.Skip(1).Where(a => !a.StartsWith("--")).Select(a => Enum.Parse<Page>(a, true)).ToList();
         if (pages.Count == 0) pages = Enum.GetValues<Page>().ToList();
 
@@ -46,6 +48,7 @@ internal static class Program
                 var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
                 psi.ArgumentList.Add(outDir);
                 if (size != null) psi.ArgumentList.Add(size);
+                if (problems) psi.ArgumentList.Add("--probleme");
                 psi.ArgumentList.Add(p.ToString());
                 using var child = System.Diagnostics.Process.Start(psi)!;
                 child.WaitForExit(60_000);
@@ -57,7 +60,15 @@ internal static class Program
         app.InitializeComponent(); // nur Ressourcen (Stile, Farben) – OnStartup läuft ohne Run() nicht
 
         using var demo = new DemoData();
+        if (problems)
+        {
+            demo.Controller.Settings.AutoRules!.Add(new RatioVPN.Core.Settings.AutoRuleEntry
+                { Name = "Discord", ExeNames = "discord.exe", TitlePattern = "Discord (Test", Mode = RatioVPN.Core.Settings.AutoRuleMode.Shared });
+            demo.Controller.Settings.AutoRules!.Add(new RatioVPN.Core.Settings.AutoRuleEntry
+                { Name = "Alle Fenster", TitlePattern = @"^(\w+\s?)*$", Mode = RatioVPN.Core.Settings.AutoRuleMode.Separate });
+        }
         var vm = new MainViewModel(demo.Controller, demo.Options);
+        if (problems) vm.StartupBanner = "Verbindung „wg-DE-999“ konnte nicht geladen werden: Schlüssel gehört zu einem anderen Windows-Konto.";
         vm.RunAutoPilot();
         vm.RefreshPrograms();
         vm.RefreshFast();
@@ -79,7 +90,7 @@ internal static class Program
             };
             win.Show();
             Pump();
-            var file = Path.Combine(outDir, $"{page.ToString().ToLowerInvariant()}-{width}x{height}.png");
+            var file = Path.Combine(outDir, $"{page.ToString().ToLowerInvariant()}-{width}x{height}{(problems ? "-probleme" : "")}.png");
             Save(win, file);
             var h1 = Find<System.Windows.Controls.TextBlock>(win, t => t.FontSize == 24);
             Console.WriteLine($"{file}  [{h1?.Text}]");

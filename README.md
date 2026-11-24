@@ -32,7 +32,7 @@ Eigenes Split-Tunneling-VPN für Windows: Du entscheidest **pro Programm**, übe
 - **Statistik**: Ausfälle pro Tag, Ranking der Verbindungen, Wechsel, Kicks und Datenmenge – beim ersten Start rückwirkend aus `fehler.log` gefüllt.
 - **Schneller**: Ohne Regeln leitet Ratio VPN gar nichts um. Der Paketweg arbeitet ohne Speicheranforderung pro Paket, die Windows-Verbindungstabelle wird zuerst nur für die Adressfamilie des Pakets gelesen und der Puffer wiederverwendet (≈ 60 % schneller). Messwerte: `docs/superpowers/bench/`.
 - **Neue Oberfläche**: Navigation links, eigener Fensterrahmen, Mica-Hintergrund ab Windows 11 22H2, Symbol im Infobereich mit Statusfarbe und Automatik-Schalter.
-- **Umstieg**: Die neue `RatioVPN.exe` einfach starten – sie beendet die alte Version automatisch, übernimmt alle Einstellungen und stellt den Autostart auf sich um.
+- **Umstieg**: Die neue `RatioVPN.exe` einfach starten – sie beendet die alte Version automatisch, übernimmt alle Einstellungen und stellt den Autostart auf sich um. Wer zwischendurch noch einmal 1.0 startet, verliert die 2.0-Einstellungen nicht: Regeln, Hinweis-Einstellung, geprüfte IPs und die Kennzeichnung der Automatik-Blockaden liegen zusätzlich in `settings.v2.json` und werden beim nächsten Start von 2.0 wiederhergestellt. Änderungen, die man in 1.0 an der Minecraft-Automatik macht, übernimmt 2.0 dabei nicht.
 
 ## So funktioniert es
 

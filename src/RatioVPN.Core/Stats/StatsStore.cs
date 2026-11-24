@@ -45,6 +45,9 @@ public sealed class StatsStore
     /// <summary>Wie oft die Datei gekürzt wurde (Diagnose/Tests).</summary>
     public int TrimCount { get; private set; }
 
+    /// <summary>Wie oft an die Datei angehängt wurde (Diagnose/Tests).</summary>
+    public int WriteCount { get; private set; }
+
     public StatsStore(string path, Func<DateTime>? clock = null)
     {
         FilePath = path;
@@ -63,6 +66,18 @@ public sealed class StatsStore
         {
             _events.Add(e);
             Append(new Line(e.Time, "event", e.Kind, e.TunnelName, e.Title, e.Message));
+        }
+    }
+
+    /// <summary>Viele Ereignisse auf einmal (ein Schreibvorgang), z. B. beim Rückblick aus dem Protokoll.</summary>
+    public void AddRange(IEnumerable<StatEvent> events)
+    {
+        lock (_lock)
+        {
+            var list = events.ToList();
+            if (list.Count == 0) return;
+            _events.AddRange(list);
+            Append(list.Select(e => new Line(e.Time, "event", e.Kind, e.TunnelName, e.Title, e.Message)));
         }
     }
 
@@ -147,12 +162,17 @@ public sealed class StatsStore
         }
     }
 
-    private void Append(Line line)
+    private void Append(Line line) => Append(new[] { line });
+
+    private void Append(IEnumerable<Line> lines)
     {
         try
         {
+            var sb = new StringBuilder();
+            foreach (var line in lines) sb.Append(JsonSerializer.Serialize(line, Json)).Append('\n');
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.AppendAllText(FilePath, JsonSerializer.Serialize(line, Json) + "\n");
+            File.AppendAllText(FilePath, sb.ToString());
+            WriteCount++;
             if (new FileInfo(FilePath).Length > MaxFileBytes) Trim();
         }
         catch (IOException) { }
@@ -168,7 +188,7 @@ public sealed class StatsStore
         TrimCount++;
         var cut = _clock() - KeepAfterTrim;
         var all = _events.Where(e => e.Time >= cut)
-            .Select(e => (e.Time, Json: JsonSerializer.Serialize(new Line(e.Time, "event", e.Kind, e.TunnelName, e.Title, e.Message), Json), Event: e, Traffic: (TrafficSample?)null))
+            .Select(e => (e.Time, Json: JsonSerializer.Serialize(new Line(e.Time, "event", e.Kind, e.TunnelName, e.Title, e.Message), Json), Event: (StatEvent?)e, Traffic: (TrafficSample?)null))
             .Concat(_traffic.Where(s => s.Time >= cut)
                 .Select(s => (s.Time, Json: JsonSerializer.Serialize(new Line(s.Time, "traffic", Tunnel: s.TunnelName, Rx: s.Rx, Tx: s.Tx), Json), Event: (StatEvent?)null, Traffic: (TrafficSample?)s)))
             .OrderByDescending(x => x.Time)

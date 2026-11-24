@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Input;
 using RatioVPN.Core;
@@ -21,6 +20,7 @@ public sealed class RuleItem : ObservableObject
     {
         _owner = owner;
         Entry = entry;
+        _ruleProblem = owner.ProblemFor(entry) ?? ""; // z. B. ungültiges Muster aus der Übernahme – sofort zeigen
     }
 
     public string Name
@@ -41,8 +41,26 @@ public sealed class RuleItem : ObservableObject
         set { var v = (value ?? "").Trim(); if (v == Entry.ExeNames) return; Entry.ExeNames = v; Changed(); Raise(nameof(KindText)); }
     }
 
-    private string _patternError = "";
-    public string PatternError { get => _patternError; private set => Set(ref _patternError, value); }
+    /// <summary>Fehler der letzten Eingabe (wurde nicht übernommen).</summary>
+    private string _inputError = "";
+    /// <summary>Problem des gespeicherten Musters (ungültig oder zu aufwendig) laut Automatik.</summary>
+    private string _ruleProblem;
+    public string PatternError => _inputError.Length > 0 ? _inputError : _ruleProblem;
+
+    private void SetInputError(string text)
+    {
+        if (text == _inputError) return;
+        _inputError = text;
+        Raise(nameof(PatternError));
+    }
+
+    internal void SetRuleProblem(string? problem)
+    {
+        problem ??= "";
+        if (problem == _ruleProblem) return;
+        _ruleProblem = problem;
+        Raise(nameof(PatternError));
+    }
 
     public string TitlePattern
     {
@@ -50,20 +68,18 @@ public sealed class RuleItem : ObservableObject
         set
         {
             var v = value ?? "";
-            if (v == Entry.TitlePattern) { PatternError = ""; return; }
-            try
+            if (v == Entry.TitlePattern) { SetInputError(""); return; }
+            if (AutoRuleEntry.CheckPattern(v) != null)
             {
-                _ = new Regex(v);
-                PatternError = "";
-                Entry.TitlePattern = v;
-                Changed();
-                Raise(nameof(KindText));
-            }
-            catch (ArgumentException)
-            {
-                PatternError = "Ungültiges Muster – wird nicht übernommen.";
+                SetInputError("Ungültiges Muster – wird nicht übernommen.");
                 Raise();
+                return;
             }
+            SetInputError("");
+            Entry.TitlePattern = v;
+            SetRuleProblem(_owner.ProblemFor(Entry));
+            Changed();
+            Raise(nameof(KindText));
         }
     }
 
@@ -125,6 +141,8 @@ public sealed class RulesViewModel : ObservableObject
     }
 
     internal void Save() => _vm.Controller.SaveSettings();
+
+    internal string? ProblemFor(AutoRuleEntry e) => _vm.AutoPilot.PatternProblem(e);
 
     /// <summary>Gewählte Vorlage aus „laufendem Programm“: legt eine Prozessregel für diese Programmdatei an.</summary>
     public string? SelectedRunningExe
@@ -190,6 +208,7 @@ public sealed class RulesViewModel : ObservableObject
         }
         foreach (var item in Rules)
         {
+            item.SetRuleProblem(ap.PatternProblem(item.Entry)); // z. B. „zu aufwendig“ erst nach dem ersten Scan bekannt
             var (w, p) = counts.GetValueOrDefault(item.Entry.Id);
             int n = w + p;
             item.HasMatches = n > 0;

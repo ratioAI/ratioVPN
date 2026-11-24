@@ -1078,6 +1078,259 @@ Console.WriteLine("Review-Nachbesserungen:");
     try { Directory.Delete(dir, true); } catch { }
 }
 
+// ================================================================ Offene Punkte (zweite Runde)
+Console.WriteLine("Offene Punkte aus dem Review (zweite Runde):");
+{
+    // Discord: nur echte Discord-Hosts
+    Check("Discord: Domains, die nur auf „discord.com“ enden, werden abgelehnt",
+        !DiscordNotifier.IsValidUrl("https://evildiscord.com/api/webhooks/1/x") && !DiscordNotifier.IsValidUrl("https://notdiscordapp.com/api/webhooks/1/x")
+        && !DiscordNotifier.IsValidUrl("https://discord.com.evil.net/api/webhooks/1/x")
+        && DiscordNotifier.IsValidUrl("https://ptb.discord.com/api/webhooks/1/x") && DiscordNotifier.IsValidUrl("https://canary.discordapp.com/api/webhooks/1/x"));
+
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var lookup = new FakeLookup();
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "settings.json")), new PlainProtector(), lookup, null);
+    c.Start();
+    var a = c.ImportConfig("A.conf", TestConf());
+    var b = c.ImportConfig("B.conf", TestConf());
+    foreach (var t in new[] { a, b }) { t.Start(); t.ForceStateForTest(TunnelState.Connected); }
+    using var s1 = StartSleeper();
+    const string javaw = @"C:\Java\javaw.exe";
+    lookup.Exe[s1.Id] = javaw; lookup.Ports[(IpProto.Tcp, 50701)] = s1.Id;
+    uint seq = 1;
+    void Traffic(ushort port) => c.Engine.HandleOutbound(BuildTcp(Ip("192.168.1.50"), Ip("5.6.7.8"), port, 25565, seq++, 1, TcpFlags.Ack, new byte[50]), 1, 0);
+    var now = new DateTime(2026, 11, 24, 12, 0, 0);
+    var w1 = new WindowInfo(s1.Id, javaw, "Minecraft* 26.2");
+
+    // M4: ein früherer Prozess mit derselben PID hatte Verkehr (Zähler je PID bleiben 15 min erhalten)
+    c.AssignWindow(s1.Id, javaw, "alt", a.Id);
+    Traffic(50701);
+    c.AssignWindow(s1.Id, javaw, "alt", null);
+    var ap = new AutoPilot(c, () => now);
+    var events = new List<AutoPilotEvent>();
+    ap.EventRaised += events.Add;
+    ap.Step(new[] { w1 });
+    now += TimeSpan.FromSeconds(61); ap.Step(new[] { w1 });
+    now += TimeSpan.FromSeconds(10); ap.Step(new[] { w1 });
+    Check("Wiederverwendete PID mit altem Verkehr → kein falscher Kick-Alarm", events.All(e => e.Kind != AutoPilotEventKind.Kicked),
+        string.Join(" | ", events.Select(e => e.Kind)));
+    Traffic(50701); ap.Step(new[] { w1 });
+    now += TimeSpan.FromSeconds(61); ap.Step(new[] { w1 });
+    Check("… neuer Verkehr, dann Stille → Kick wird weiter erkannt", events.Count(e => e.Kind == AutoPilotEventKind.Kicked) == 1,
+        string.Join(" | ", events.Select(e => e.Kind)));
+    Traffic(50701); ap.Step(new[] { w1 }); // wieder verbunden, Verkehr gerade eben
+    c.Settings.AutoPilot.Enabled = false;
+    ap.Step(new[] { w1 });
+    c.Settings.AutoPilot.Enabled = true;
+    int kicksBefore = events.Count(e => e.Kind == AutoPilotEventKind.Kicked);
+    now += TimeSpan.FromSeconds(61); ap.Step(new[] { w1 });
+    Check("Automatik aus und wieder an → Kick-Beobachtung beginnt neu (PID könnte neu vergeben sein)",
+        events.Count(e => e.Kind == AutoPilotEventKind.Kicked) == kicksBefore, string.Join(" | ", events.Select(e => e.Kind)));
+
+    // M11: „Internet weg/wieder da“ nur mit eingeschalteter Automatik
+    var cc = c.ImportConfig("C.conf", TestConf());
+    cc.Start(); cc.ForceStateForTest(TunnelState.Connected);
+    c.Settings.AutoPilot.Enabled = false;
+    var apOff = new AutoPilot(c, () => now);
+    var offEvents = new List<AutoPilotEvent>();
+    apOff.EventRaised += offEvents.Add;
+    apOff.Step(Array.Empty<WindowInfo>());
+    foreach (var t in new[] { a, b, cc }) t.ForceStateForTest(TunnelState.Error);
+    apOff.Step(Array.Empty<WindowInfo>());
+    bool downWhileOff = apOff.InternetDown;
+    foreach (var t in new[] { a, b, cc }) t.ForceStateForTest(TunnelState.Connected);
+    apOff.Step(Array.Empty<WindowInfo>());
+    Check("Automatik aus → keine „Internet weg/wieder da“-Meldungen (Ausfall wurde erkannt)",
+        downWhileOff && offEvents.All(e => e.Kind is not (AutoPilotEventKind.InternetDown or AutoPilotEventKind.InternetUp)),
+        $"down={downWhileOff} " + string.Join(" | ", offEvents.Select(e => e.Kind)));
+    foreach (var t in new[] { a, b, cc }) t.ForceStateForTest(TunnelState.Error);
+    apOff.Step(Array.Empty<WindowInfo>());
+    c.Settings.AutoPilot.Enabled = true;
+    apOff.Step(Array.Empty<WindowInfo>());
+    Check("Automatik während eines Ausfalls eingeschaltet → „Internet weg“ wird gemeldet",
+        offEvents.Count(e => e.Kind == AutoPilotEventKind.InternetDown) == 1, string.Join(" | ", offEvents.Select(e => e.Kind)));
+    foreach (var t in new[] { a, b, cc }) t.ForceStateForTest(TunnelState.Connected);
+    apOff.Step(Array.Empty<WindowInfo>());
+    Check("… und danach „Internet wieder da“", offEvents.Count(e => e.Kind == AutoPilotEventKind.InternetUp) == 1,
+        string.Join(" | ", offEvents.Select(e => e.Kind)));
+
+    // M8: sehr aufwendiges (gültiges) Muster bremst die Oberfläche nicht – und lässt nichts mit echter IP durch
+    var slow = new AutoRuleEntry { Name = "Langsam", ExeNames = "slow.exe", TitlePattern = @"^(\w+\s?)*$", Mode = AutoRuleMode.Separate };
+    c.Settings.AutoRules!.Insert(0, slow);
+    var apSlow = new AutoPilot(c, () => now);
+    var slowEvents = new List<AutoPilotEvent>();
+    apSlow.EventRaised += slowEvents.Add;
+    string SlowTitle(int i) => new string('a', 30 + i) + "!";
+    for (int i = 0; i < 5; i++) apSlow.RuleFor(90000 + i, @"C:\x\slow.exe", SlowTitle(i)); // je Titel einmal das Zeitlimit
+    var sw = Stopwatch.StartNew();
+    for (int round = 0; round < 3; round++)
+        for (int i = 0; i < 5; i++) apSlow.RuleFor(90000 + i, @"C:\x\slow.exe", SlowTitle(i));
+    sw.Stop();
+    Check("Aufwendiges Muster: je Fenstertitel höchstens einmal ein Zeitlimit", sw.ElapsedMilliseconds < 100, $"{sw.ElapsedMilliseconds} ms");
+    Check("… die Regel meldet „Muster zu aufwendig“", apSlow.PatternProblem(slow) != null);
+    Check("… andere Fenster passen weiterhin", apSlow.RuleFor(90100, @"C:\x\slow.exe", "Minecraft Server") == slow);
+    Check("… genau eine wichtige Meldung", slowEvents.Count(e => e.Important && e.Message.Contains("Langsam")) == 1,
+        string.Join(" | ", slowEvents.Select(e => e.Message)));
+    c.AssignWindow(s1.Id, @"C:\x\slow.exe", SlowTitle(0), RoutingEngine.BlockRule, auto: true);
+    apSlow.Step(new[] { new WindowInfo(s1.Id, @"C:\x\slow.exe", SlowTitle(0)) });
+    Check("Titel nicht prüfbar (Zeitlimit) → Blockade der Automatik bleibt (keine echte IP)",
+        c.WindowRuleFor(s1.Id) == RoutingEngine.BlockRule, c.WindowRuleFor(s1.Id) ?? "(keine Regel)");
+    c.AssignWindow(s1.Id, javaw, "x", null);
+    slow.TitlePattern = "^x+y$";
+    Check("… ein geändertes Muster wird wieder geprüft", apSlow.PatternProblem(slow) == null && apSlow.RuleFor(1, @"C:\x\slow.exe", "xxy") == slow);
+    c.Settings.AutoRules!.Remove(slow);
+
+    // M2: ungültiges Muster (z. B. aus der Übernahme) ist erkennbar, ohne es zu bearbeiten
+    Check("Ungültiges Muster wird erkannt", AutoRuleEntry.CheckPattern("Minecraft(") != null
+        && AutoRuleEntry.CheckPattern("Minecraft.*") == null && AutoRuleEntry.CheckPattern("") == null);
+
+    // M6: nach dem Beenden öffnet nichts die Umleitung wieder (z. B. eine noch laufende IP-Prüfung)
+    var dir2 = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var cap2 = new FakeCapture();
+    var c2 = new VpnController(new SettingsStore(Path.Combine(dir2, "settings.json")), new PlainProtector(), new FakeLookup(), cap2);
+    c2.Start();
+    c2.Dispose();
+    c2.AssignWindow(Environment.ProcessId, javaw, "x", RoutingEngine.BlockRule);
+    Check("Nach dem Beenden öffnet keine Regeländerung die Umleitung wieder", !cap2.IsRunning, $"starts={cap2.Starts}");
+
+    // M7: Fehleranzeige der Umleitung
+    var dir3 = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var cap3 = new FakeCapture();
+    var c3 = new VpnController(new SettingsStore(Path.Combine(dir3, "settings.json")), new PlainProtector(), new FakeLookup(), cap3);
+    c3.Start();
+    var t3 = c3.ImportConfig("A.conf", TestConf());
+    cap3.FailNextStart = true;
+    c3.AssignProgram(@"C:\Tools\bot.exe", "Bot", t3.Id);
+    bool hadError = c3.CaptureError != null;
+    c3.AssignProgram(@"C:\Tools\bot.exe", "Bot", null);
+    Check("Umleitungsfehler verschwindet, wenn nichts mehr umgeleitet werden muss", hadError && c3.CaptureError == null, c3.CaptureError);
+    Check("Hinweisleiste zeigt Start-Probleme und Umleitungsfehler zusammen",
+        BannerText.Compose("Verbindung X nicht ladbar", "Paketumleitung kaputt") == "Paketumleitung kaputt\nVerbindung X nicht ladbar"
+        && BannerText.Compose("Start", null) == "Start" && BannerText.Compose(null, "") == "");
+    t3.Stop();
+
+    // M9: Fehler bei der Paketentscheidung lassen nichts mit echter oder umgeschriebener Adresse durch
+    OutboundVerdict TryOut(RoutingEngine e, byte[] pkt) { try { return e.HandleOutbound(pkt, 1, 0); } catch { return (OutboundVerdict)99; } }
+    var eng = new RoutingEngine(new ThrowingLookup(), new FakeInjector());
+    var tt = new WgTunnel("t", "T", WgConfig.Parse(TestConf()));
+    eng.AddTunnel(tt);
+    eng.SetRules(new[] { new KeyValuePair<string, string>(@"C:\x\vpn.exe", "t") });
+    var pkt1 = BuildUdp(Ip("192.168.1.50"), Ip("5.6.7.8"), 40100, 9999, new byte[10]);
+    Check("Fehler beim Nachschlagen des Prozesses → mit Kill-Switch verworfen", TryOut(eng, pkt1) == OutboundVerdict.Drop, $"{TryOut(eng, pkt1)}");
+    eng.KillSwitch = false;
+    Check("… ohne Kill-Switch direkt (wie ohne Regel)", TryOut(eng, pkt1) == OutboundVerdict.Pass, $"{TryOut(eng, pkt1)}");
+    var lk = new FakeLookup();
+    var eng2 = new RoutingEngine(lk, new FakeInjector());
+    var tt2 = new WgTunnel("t2", "T2", WgConfig.Parse(TestConf()));
+    eng2.AddTunnel(tt2);
+    eng2.SetRules(new[] { new KeyValuePair<string, string>(@"C:\x\vpn.exe", "t2") });
+    lk.Ports[(IpProto.Udp, 40101)] = 4321; lk.Exe[4321] = @"C:\x\vpn.exe";
+    tt2.FailSendForTest = true;
+    eng2.KillSwitch = false;
+    var v9 = TryOut(eng2, BuildUdp(Ip("192.168.1.50"), Ip("5.6.7.8"), 40101, 9999, new byte[10]));
+    Check("Fehler nach dem Umschreiben der Absenderadresse → verworfen (auch ohne Kill-Switch)", v9 == OutboundVerdict.Drop, $"{v9}");
+    tt2.FailSendForTest = false;
+    tt2.Stop();
+    eng.Dispose(); eng2.Dispose();
+
+    // M11: Rückblick aus dem Protokoll schreibt die Statistik in einem Rutsch
+    var dir4 = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(dir4);
+    var log4 = Path.Combine(dir4, "fehler.log");
+    File.WriteAllLines(log4, Enumerable.Range(0, 50).Select(i => $"[2026-10-20 03:{i:00}:00] Automatik: Verbindung wg-{i} antwortet nicht mehr"));
+    var st4 = new RatioVPN.Core.Stats.StatsStore(Path.Combine(dir4, "statistik.jsonl"));
+    int n4 = RatioVPN.Core.Stats.LogBackfill.Import(log4, st4);
+    Check("Rückblick: 50 Ereignisse, ein Schreibvorgang", n4 == 50 && st4.WriteCount == 1
+        && new RatioVPN.Core.Stats.StatsStore(st4.FilePath).Events.Count == 50, $"{n4} / {st4.WriteCount}");
+
+    // M10: zwischendurch 1.0 gestartet → die 2.0-Einstellungen gehen nicht verloren
+    var dir5 = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var store5 = new SettingsStore(Path.Combine(dir5, "settings.json"));
+    var s5 = new AppSettings();
+    s5.AutoRules = new List<AutoRuleEntry> { new() { Name = "Discord", ExeNames = "discord.exe", Mode = AutoRuleMode.Shared } };
+    s5.Ui.NotifyImportant = false;
+    s5.Tunnels.Add(new TunnelEntry { Name = "A", ProtectedConfig = "x", LastPublicIp = "1.2.3.4", LastPublicIpAt = new DateTime(2026, 11, 24, 10, 0, 0) });
+    s5.WindowRules.Add(new WindowRuleEntry { Pid = 777, StartTimeTicks = 123, ExePath = @"C:\x\a.exe", Title = "a", TunnelId = RoutingEngine.BlockRule, Auto = true });
+    s5.WindowRules.Add(new WindowRuleEntry { Pid = 778, StartTimeTicks = 456, ExePath = @"C:\x\b.exe", Title = "b", TunnelId = RoutingEngine.BlockRule });
+    store5.Save(s5);
+    var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(store5.FilePath))!.AsObject();
+    node.Remove("AutoRules"); node.Remove("Ui"); // so speichert 1.0: neue Felder kennt es nicht
+    foreach (var tn in node["Tunnels"]!.AsArray()) { tn!.AsObject().Remove("LastPublicIp"); tn.AsObject().Remove("LastPublicIpAt"); }
+    foreach (var wn in node["WindowRules"]!.AsArray()) wn!.AsObject().Remove("Auto");
+    File.WriteAllText(store5.FilePath, node.ToJsonString());
+    var back = store5.Load();
+    Check("Nach einem Start von 1.0 sind Regeln, Hinweis-Einstellung und IPs von 2.0 wieder da",
+        back.AutoRules?.Count == 1 && back.AutoRules[0].Name == "Discord" && back.AutoRules[0].Mode == AutoRuleMode.Shared
+        && !back.Ui.NotifyImportant && back.Tunnels[0].LastPublicIp == "1.2.3.4");
+    Check("… Blockaden der Automatik bleiben als solche erkennbar (Nutzer-Blockaden nicht)",
+        back.WindowRules.Single(r => r.Pid == 777).Auto && !back.WindowRules.Single(r => r.Pid == 778).Auto);
+    var c5 = new VpnController(store5, new PlainProtector(), new FakeLookup(), null);
+    c5.Start();
+    Check("… und die Minecraft-Übernahme überschreibt sie nicht", c5.Settings.AutoRules!.Count == 1 && c5.Settings.AutoRules[0].Name == "Discord");
+    Check("… settings.json wird nach dem Wiederherstellen gleich neu gespeichert", File.ReadAllText(store5.FilePath).Contains("\"AutoRules\""));
+    c5.Dispose();
+
+    foreach (var t in new[] { a, b, cc }) t.Stop();
+    try { s1.Kill(); } catch { }
+    foreach (var d in new[] { dir, dir2, dir3, dir4, dir5 }) try { Directory.Delete(d, true); } catch { }
+}
+
+// ================================================================ Paketumleitung beenden (simulierter Treiber)
+Console.WriteLine("Paketumleitung beenden (WinDivert simuliert):");
+if (OperatingSystem.IsWindows())
+{
+    bool WaitFor(Func<bool> cond, int ms)
+    {
+        var until = DateTime.UtcNow.AddMilliseconds(ms);
+        while (DateTime.UtcNow < until) { if (cond()) return true; Thread.Sleep(5); }
+        return cond();
+    }
+    var engine = new RoutingEngine(new FakeLookup(), new FakeInjector()); // ohne Regeln: alles „durchlassen“
+    var junk = new byte[] { 1, 2, 3, 4 };
+
+    // Normalfall: wartende Pakete werden beim Beenden noch durchgereicht, dann erst geschlossen
+    var nat = new FakeDivert();
+    var svc = new RatioVPN.Core.Windows.DivertService(nat);
+    svc.Start(engine, 2);
+    var h1 = nat.LastOpened;
+    for (int i = 0; i < 20; i++) nat.Enqueue(h1, junk);
+    Check("Simulierter Treiber: Pakete werden durchgereicht", WaitFor(() => nat.Sent == 20, 3000), $"{nat.Sent}");
+    for (int i = 0; i < 20; i++) nat.Enqueue(h1, junk);
+    svc.Stop();
+    Check("Beenden: wartende Pakete gehen noch raus, dann wird geschlossen",
+        WaitFor(() => nat.IsClosed(h1), 3000) && nat.Sent == 40 && nat.Violations == 0, $"sent={nat.Sent} closed={nat.IsClosed(h1)} v={nat.Violations}");
+
+    // Schlimmster Fall: Shutdown weckt nichts, ein Senden hängt 1,5 s – Stop darf die Oberfläche nicht blockieren
+    // und das Handle erst schließen, wenn kein Senden mehr läuft
+    var nat2 = new FakeDivert { ShutdownWakes = false };
+    var svc2 = new RatioVPN.Core.Windows.DivertService(nat2);
+    svc2.Start(engine, 2);
+    var h2 = nat2.LastOpened;
+    nat2.SendGate.Reset();
+    nat2.Enqueue(h2, junk);
+    Check("Simulierter Treiber: ein Senden hängt", WaitFor(() => nat2.InSend(h2) == 1, 3000));
+    var sw = Stopwatch.StartNew();
+    svc2.Stop();
+    sw.Stop();
+    Check("Stop kehrt sofort zurück (blockiert die Oberfläche nicht)", sw.ElapsedMilliseconds < 200 && !svc2.IsRunning, $"{sw.ElapsedMilliseconds} ms");
+    svc2.Start(engine, 2);
+    var h3 = nat2.LastOpened;
+    Check("Gleich wieder einschalten öffnet ein neues Handle", svc2.IsRunning && h3 != h2);
+    svc2.InjectInbound(junk, junk.Length, 1, 0);
+    Check("Eingehende Pakete gehen über das neue Handle", nat2.InjectedOn == h3);
+    Thread.Sleep(1500);
+    nat2.SendGate.Set();
+    Check("Altes Handle wird erst nach dem hängenden Senden geschlossen",
+        WaitFor(() => nat2.IsClosed(h2), 5000) && nat2.Violations == 0, $"closed={nat2.IsClosed(h2)} v={nat2.Violations}");
+    svc2.Dispose();
+    Check("Dispose schließt alles (wartet auf das Beenden)", nat2.IsClosed(h3) && nat2.Violations == 0);
+    engine.Dispose();
+}
+else
+{
+    Console.WriteLine("  (nur unter Windows)");
+}
+
 static Process StartSleeper()
 {
     var exe = Environment.ProcessPath!;
@@ -1250,4 +1503,85 @@ sealed class FakeCapture : IPacketCapture
     }
     public void Stop() { Stops++; IsRunning = false; }
     public void InjectInbound(byte[] packet, int length, uint ifIdx, uint subIfIdx) { }
+}
+
+sealed class ThrowingLookup : IProcessLookup
+{
+    public int? GetPid(byte protocol, ushort localPort, bool v6, bool requireFresh) => throw new InvalidOperationException("Testfehler");
+    public string? GetExePath(int pid) => throw new InvalidOperationException("Testfehler");
+}
+
+sealed class FakeDivert : RatioVPN.Core.Windows.IDivertNative
+{
+    private sealed class H
+    {
+        public readonly BlockingCollection<byte[]> Queue = new();
+        public volatile bool Shut, Closed;
+        public int InSend;
+    }
+    private readonly ConcurrentDictionary<IntPtr, H> _h = new();
+    private long _next = 1000;
+    /// <summary>true: nach Shutdown liefert Recv den Rest und dann ERROR_NO_DATA. false: Recv wartet bis Close.</summary>
+    public bool ShutdownWakes = true;
+    /// <summary>Zurückgesetzt: ausgehendes Senden hängt, bis es wieder gesetzt wird.</summary>
+    public readonly ManualResetEventSlim SendGate = new(true);
+    public int Sent, Violations;
+    public IntPtr LastOpened, InjectedOn;
+
+    public void Enqueue(IntPtr h, byte[] p) => _h[h].Queue.Add(p);
+    public bool IsClosed(IntPtr h) => _h[h].Closed;
+    public int InSend(IntPtr h) => Volatile.Read(ref _h[h].InSend);
+
+    public IntPtr Open(string filter)
+    {
+        var h = new IntPtr(Interlocked.Increment(ref _next));
+        _h[h] = new H();
+        LastOpened = h;
+        return h;
+    }
+
+    public unsafe int Recv(IntPtr handle, byte* packet, uint packetLen, out uint recvLen, out RatioVPN.Core.Windows.WinDivertAddress addr)
+    {
+        recvLen = 0;
+        addr = default;
+        if (!_h.TryGetValue(handle, out var h) || h.Closed) { Interlocked.Increment(ref Violations); return 6; }
+        while (true)
+        {
+            if (h.Closed) return 6;
+            if (h.Queue.TryTake(out var p, 5))
+            {
+                for (int i = 0; i < p.Length; i++) packet[i] = p[i];
+                recvLen = (uint)p.Length;
+                addr.Outbound = true;
+                return 0;
+            }
+            if (h.Shut && ShutdownWakes) return 232;
+        }
+    }
+
+    public unsafe bool Send(IntPtr handle, byte* packet, uint packetLen, ref RatioVPN.Core.Windows.WinDivertAddress addr)
+    {
+        if (!_h.TryGetValue(handle, out var h) || h.Closed) { Interlocked.Increment(ref Violations); return false; }
+        if (!addr.Outbound) { InjectedOn = handle; return true; }
+        Interlocked.Increment(ref h.InSend);
+        SendGate.Wait(10_000);
+        Interlocked.Decrement(ref h.InSend);
+        Interlocked.Increment(ref Sent);
+        return true;
+    }
+
+    public unsafe void CalcChecksums(byte* packet, uint packetLen, ref RatioVPN.Core.Windows.WinDivertAddress addr) { }
+
+    public bool Shutdown(IntPtr handle)
+    {
+        _h[handle].Shut = true;
+        return true;
+    }
+
+    public void Close(IntPtr handle)
+    {
+        var h = _h[handle];
+        if (Volatile.Read(ref h.InSend) > 0 || h.Closed) Interlocked.Increment(ref Violations); // nie während eines Sendens / doppelt
+        h.Closed = true;
+    }
 }

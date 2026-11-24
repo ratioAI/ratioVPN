@@ -32,6 +32,8 @@ public sealed class VpnController : IDisposable
     private readonly object _captureLock = new();
     private bool _captureUsable;
     private bool _captureWanted;
+    /// <summary>Nach Dispose darf nichts die Umleitung wieder öffnen (z. B. eine noch laufende IP-Prüfung).</summary>
+    private bool _disposed;
 
     /// <summary>Öffentliche IPs dürfen nur mit laufender Umleitung geprüft werden – sonst käme die echte IP heraus.</summary>
     public bool CanCheckPublicIp => _capture != null && _captureUsable && CaptureError == null;
@@ -71,7 +73,7 @@ public sealed class VpnController : IDisposable
     {
         var problems = new List<string>();
         Settings = _store.Load();
-        if (AutoRuleMigration.Apply(Settings)) Save();
+        if (AutoRuleMigration.Apply(Settings) || _store.RestoredExtras) Save();
         Engine.KillSwitch = Settings.KillSwitch;
 
         foreach (var entry in Settings.Tunnels.ToList())
@@ -298,6 +300,7 @@ public sealed class VpnController : IDisposable
         bool changed = false;
         lock (_captureLock)
         {
+            if (_disposed) return;
             if (wanted && !_capture.IsRunning)
             {
                 try
@@ -313,9 +316,12 @@ public sealed class VpnController : IDisposable
                     CaptureError = error;
                 }
             }
-            else if (!wanted && _capture.IsRunning)
+            else if (!wanted)
             {
-                _capture.Stop();
+                if (_capture.IsRunning) _capture.Stop();
+                // Nichts mehr umzuleiten → nichts ungeschützt: ein alter Fehler soll nicht stehen bleiben.
+                changed = CaptureError != null;
+                CaptureError = null;
             }
         }
         if (changed) RaiseChanged();
@@ -389,7 +395,12 @@ public sealed class VpnController : IDisposable
 
     public void Dispose()
     {
-        _capture?.Stop();
+        lock (_captureLock)
+        {
+            _disposed = true;
+            _capture?.Stop();
+        }
+        (_capture as IDisposable)?.Dispose();
         foreach (var t in Tunnels) t.Stop();
         Engine.Dispose();
     }

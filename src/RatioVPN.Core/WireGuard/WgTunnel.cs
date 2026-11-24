@@ -180,6 +180,9 @@ public sealed class WgTunnel : IDisposable
         lock (_lock) _lastReceived = DateTime.UtcNow - ago;
     }
 
+    /// <summary>Test: SendPacket wirft (interner Fehler im Sendeweg).</summary>
+    internal bool FailSendForTest;
+
     /// <summary>Nur für Tests/Vorschau: Handshake-Laufzeit setzen.</summary>
     internal void SetHandshakeRttForTest(TimeSpan rtt) => LastHandshakeRtt = rtt;
 
@@ -201,6 +204,7 @@ public sealed class WgTunnel : IDisposable
     /// <summary>Verschlüsselt ein IP-Paket und schickt es an den Server.</summary>
     public void SendPacket(ReadOnlySpan<byte> ipPacket)
     {
+        if (FailSendForTest) throw new InvalidOperationException("Testfehler im Sendeweg");
         var kp = _current;
         if (kp == null || kp.Expired)
         {

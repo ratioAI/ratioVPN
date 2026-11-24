@@ -47,7 +47,17 @@ public sealed class AutoPilot
     private readonly Dictionary<int, string> _lastNotice = new();
     private readonly Dictionary<string, bool> _tunnelFailed = new();
     private readonly List<AutoPilotEvent> _history = new();
-    private readonly Dictionary<string, (string Pattern, Regex? Regex)> _regex = new();
+    /// <summary>Übersetztes Titelmuster einer Regel. SlowTitles: Titel, bei denen das Zeitlimit überschritten wurde.</summary>
+    private sealed class CompiledPattern(string pattern, Regex? regex)
+    {
+        public string Pattern { get; } = pattern;
+        public Regex? Regex { get; } = regex;
+        public HashSet<string> SlowTitles { get; } = new();
+        public bool Reported { get; set; }
+    }
+    private readonly Dictionary<string, CompiledPattern> _regex = new();
+    /// <summary>Die letzte Titelprüfung lief ins Zeitlimit: ob das Fenster zur Regel passt, ist unklar.</summary>
+    private bool _titleUncertain;
     private readonly Dictionary<int, (string? Tunnel, DateTime Since)> _since = new();
     private List<ManagedInstance> _instances = new();
     /// <summary>Ausfallzeitpunkte je Verbindung (nur echte Einzelausfälle, nicht während „Internet weg“).</summary>
@@ -81,6 +91,8 @@ public sealed class AutoPilot
 
     /// <summary>Fast alle Verbindungen antworten nicht → eher das eigene Internet weg als die Server.</summary>
     public bool InternetDown { get; private set; }
+    /// <summary>„Internet weg“ wurde gemeldet – dann auch „wieder da“ melden.</summary>
+    private bool _announcedDown;
 
     public AutoPilot(VpnController controller, Func<DateTime>? clock = null)
     {
@@ -134,19 +146,57 @@ public sealed class AutoPilot
         return null;
     }
 
-    private bool TitleMatches(AutoRuleEntry r, string title)
+    /// <summary>Übersetztes Titelmuster (null = ungültig) für die aktuelle Fassung der Regel.</summary>
+    private CompiledPattern CompiledFor(AutoRuleEntry r)
     {
         if (!_regex.TryGetValue(r.Id, out var cached) || cached.Pattern != r.TitlePattern)
         {
             Regex? rx;
             try { rx = new Regex(r.TitlePattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50)); }
             catch (ArgumentException) { rx = null; }
-            cached = (r.TitlePattern, rx);
+            cached = new CompiledPattern(r.TitlePattern, rx);
             _regex[r.Id] = cached;
         }
+        return cached;
+    }
+
+    private bool TitleMatches(AutoRuleEntry r, string title)
+    {
+        var cached = CompiledFor(r);
         if (cached.Regex == null) return false;
+        if (cached.SlowTitles.Contains(title))
+        {
+            _titleUncertain = true;
+            return false;
+        }
         try { return cached.Regex.IsMatch(title); }
-        catch (RegexMatchTimeoutException) { return false; }
+        catch (RegexMatchTimeoutException)
+        {
+            // Läuft auf dem UI-Thread, je Fenster und Scan: diesen Titel nicht erneut prüfen, sonst bremst er die
+            // Oberfläche bei jedem Scan. Nur dieser Titel ist unklar – andere Fenster der Regel passen weiter.
+            if (cached.SlowTitles.Count >= 1000) cached.SlowTitles.Clear();
+            cached.SlowTitles.Add(title);
+            _titleUncertain = true;
+            if (!cached.Reported)
+            {
+                cached.Reported = true;
+                var shortTitle = title.Length > 40 ? title[..40] + "…" : title;
+                Raise($"Regel „{r.Name}“: Fenstertitel-Muster ist zu aufwendig – Fenster wie „{shortTitle}“ werden übersprungen. Bitte das Muster vereinfachen.",
+                    true, AutoPilotEventKind.Info);
+            }
+            return false;
+        }
+    }
+
+    /// <summary>Problem mit dem Titelmuster einer Regel (ungültig oder zu aufwendig) oder null.</summary>
+    public string? PatternProblem(AutoRuleEntry rule)
+    {
+        if (string.IsNullOrWhiteSpace(rule.TitlePattern)) return null;
+        var cached = CompiledFor(rule);
+        if (cached.Regex == null) return AutoRuleEntry.InvalidPatternText;
+        if (cached.SlowTitles.Count > 0)
+            return "Muster zu aufwendig für manche Fenstertitel (Zeitlimit) – diese Fenster werden übersprungen. Bitte vereinfachen.";
+        return null;
     }
 
     /// <summary>Verbindung ist weg, getrennt oder antwortet nicht mehr.</summary>
@@ -197,6 +247,7 @@ public sealed class AutoPilot
         {
             ReleaseAutoBlocks(new HashSet<int>());
             _instances = new();
+            _watch.Clear(); // beim Wiedereinschalten neu beobachten: eine PID kann inzwischen einem anderen Prozess gehören
             return;
         }
 
@@ -207,9 +258,11 @@ public sealed class AutoPilot
             ThreadPool.QueueUserWorkItem(static t => { try { t.Start(); } catch { } }, t, preferLocal: false);
         }
 
-        var instances = FindInstances(snapshot);
+        var uncertain = new HashSet<int>();
+        var instances = FindInstances(snapshot, uncertain);
         var managedPids = instances.Select(i => i.Pid).ToHashSet();
-        ReleaseAutoBlocks(managedPids);
+        // Fenster, deren Titel nicht geprüft werden konnte (Zeitlimit), behalten ihre Blockade – im Zweifel keine echte IP.
+        ReleaseAutoBlocks(managedPids.Concat(uncertain).ToHashSet());
 
         // Belegt sind Verbindungen aus Programm-Regeln und aus Regeln nicht verwalteter Prozesse.
         var used = new HashSet<string>();
@@ -350,7 +403,9 @@ public sealed class AutoPilot
             long count = _c.Engine.TryGetTraffic(i.Pid, out var traffic) ? traffic.Packets : 0;
             if (!_watch.TryGetValue(i.Pid, out var w))
             {
-                _watch[i.Pid] = new TrafficWatch { LastCount = count, LastChange = now, HadTraffic = count > 0 };
+                // Zählerstand beim ersten Blick nur als Ausgangswert: er kann von einem beendeten Prozess mit derselben
+                // (wiederverwendeten) PID stammen. Erst neuer Verkehr macht die Kopie „aktiv“.
+                _watch[i.Pid] = new TrafficWatch { LastCount = count, LastChange = now, HadTraffic = false };
                 continue;
             }
             var tunnel = _c.WindowRuleFor(i.Pid);
@@ -376,12 +431,15 @@ public sealed class AutoPilot
     }
 
     /// <summary>Ein Eintrag je Prozess: die erste passende Regel (über Fenster und Prozessliste) gewinnt.</summary>
-    private List<Inst> FindInstances(SystemSnapshot snapshot)
+    private List<Inst> FindInstances(SystemSnapshot snapshot, HashSet<int> uncertain)
     {
         var best = new Dictionary<int, Inst>();
         void Consider(int pid, string exePath, string? title)
         {
-            if (RuleIndexFor(exePath, title) is not int idx) return;
+            _titleUncertain = false;
+            var found = RuleIndexFor(exePath, title);
+            if (_titleUncertain) uncertain.Add(pid);
+            if (found is not int idx) return;
             if (best.TryGetValue(pid, out var existing) && existing.RuleIndex <= idx) return;
             var label = title ?? Path.GetFileName(exePath);
             best[pid] = new Inst(Rules[idx], idx, pid, exePath, label);
@@ -443,14 +501,24 @@ public sealed class AutoPilot
         if (down && !InternetDown)
         {
             InternetDown = true;
-            Raise("Internet weg – keine Verbindung antwortet mehr. Es wird nichts umgestellt, bis es wieder da ist.",
-                true, AutoPilotEventKind.InternetDown);
         }
         else if (!down && InternetDown)
         {
             InternetDown = false;
             _holdUntil = _clock() + GraceAfterOutage;
-            Raise("Internet wieder da", true, AutoPilotEventKind.InternetUp);
+            if (_announcedDown)
+            {
+                _announcedDown = false;
+                Raise("Internet wieder da", true, AutoPilotEventKind.InternetUp);
+            }
+        }
+        // Nur mit eingeschalteter Automatik melden (die Meldung beschreibt, was sie tut) – auch wenn sie erst während
+        // des Ausfalls eingeschaltet wird.
+        if (InternetDown && !_announcedDown && S.Enabled)
+        {
+            _announcedDown = true;
+            Raise("Internet weg – keine Verbindung antwortet mehr. Es wird nichts umgestellt, bis es wieder da ist.",
+                true, AutoPilotEventKind.InternetDown);
         }
         if (InternetDown) foreach (var t in failed) _outageTunnels.Add(t.Id);
     }

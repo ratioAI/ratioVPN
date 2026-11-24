@@ -115,7 +115,7 @@ public partial class App : Application
             catch (Exception ex) { Log("Statistik-Rückblick: " + ex.Message); }
         }
 
-        var vm = new MainViewModel(_controller, ShellOptions.Default with { Stats = stats }) { Banner = banner ?? "" };
+        var vm = new MainViewModel(_controller, ShellOptions.Default with { Stats = stats }) { StartupBanner = banner ?? "" };
 
         // Zuverlässigkeit der letzten 24 h übernehmen (Statistik kennt Namen, die Automatik IDs)
         var idByName = _controller.Tunnels.GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)

@@ -112,7 +112,7 @@
                                     <StackPanel Grid.Column="2">
                                         <TextBlock Text="FENSTERTITEL (REGULÄRER AUSDRUCK)" Style="{StaticResource MutedText}" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,5"/>
                                         <TextBox Style="{StaticResource MonoTextBox}" Text="{Binding TitlePattern, UpdateSourceTrigger=LostFocus}"/>
-                                        <TextBlock Text="{Binding PatternError}" Foreground="{StaticResource Danger}" FontSize="11" Margin="0,4,0,0"
+                                        <TextBlock Text="{Binding PatternError}" Foreground="{StaticResource Danger}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"
                                                    Visibility="{Binding PatternError, Converter={StaticResource EmptyToCollapsed}}"/>
                                         <TextBlock Style="{StaticResource MutedText}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"
                                                    Text="Leer = Programm auch ohne Fenster erkennen (Skripte, Bots, Dienste)"/>

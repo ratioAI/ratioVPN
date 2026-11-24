@@ -147,6 +147,22 @@ public sealed class RoutingEngine : IDisposable
 
     public OutboundVerdict HandleOutbound(Span<byte> packet, uint ifIdx, uint subIfIdx)
     {
+        bool rewritten = false;
+        try
+        {
+            return Decide(packet, ifIdx, subIfIdx, ref rewritten);
+        }
+        catch
+        {
+            // Interner Fehler: nie ein schon umgeschriebenes Paket ins Internet lassen, und mit Kill-Switch auch kein
+            // Paket, dessen Programm unbekannt ist (es könnte ein VPN-Programm sein → echte IP).
+            if (rewritten || KillSwitch) { Interlocked.Increment(ref _dropped); return OutboundVerdict.Drop; }
+            return OutboundVerdict.Pass;
+        }
+    }
+
+    private OutboundVerdict Decide(Span<byte> packet, uint ifIdx, uint subIfIdx, ref bool rewritten)
+    {
         if (!IpPacket.TryParse(packet, out var info) || !info.HasPorts) return OutboundVerdict.Pass;
 
         var port = ResolvePort(info);
@@ -200,6 +216,7 @@ public sealed class RoutingEngine : IDisposable
         nat.Traffic = traffic;
         traffic.AddOut(info.TotalLength, now);
 
+        rewritten = true;
         IpPacket.SetSrcV4(packet, tunnel.AddressV4Raw);
 
         bool isSyn = info.Protocol == IpProto.Tcp && (info.TcpFlags & TcpFlags.Syn) != 0;
