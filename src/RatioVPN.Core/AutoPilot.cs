@@ -126,7 +126,8 @@ public sealed class AutoPilot
 
     private int? RuleIndexFor(string exePath, string? title)
     {
-        var exe = Path.GetFileName(exePath.Replace('/', '\\')).ToLowerInvariant();
+        // Windows-Pfade auch unter Linux (CI) zerlegen: Path.GetFileName kennt dort nur '/' als Trenner.
+        var exe = exePath[(exePath.LastIndexOfAny(new[] { '\\', '/' }) + 1)..].Trim().ToLowerInvariant();
         var rules = Rules;
         for (int i = 0; i < rules.Count; i++)
         {
