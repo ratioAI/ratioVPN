@@ -230,19 +230,53 @@ Console.WriteLine("Port-Zuordnung (Windows-Verbindungstabelle):");
 {
     long clock = 3_600_000_000; // realistische Uptime (≈ 41 Tage) – deckte den Überlauf-Fehler auf
     var table = new Dictionary<ushort, int> { [50000] = 4242 };
-    var cache = new PortOwnerCache(_ => new Dictionary<ushort, int>(table), () => clock);
-    Check("Erster Aufruf liest die Tabelle", cache.GetPid(IpProto.Tcp, 50000, true) == 4242 && cache.Reads == 1);
-    Check("Treffer innerhalb 50 ms ohne erneutes Lesen", cache.GetPid(IpProto.Tcp, 50000, true) == 4242 && cache.Reads == 1);
+    var table6 = new Dictionary<ushort, int>();
+    var fills = new List<(bool Tcp, bool V6)>();
+    void Fill(bool tcp, bool v6, Dictionary<ushort, int> into)
+    {
+        fills.Add((tcp, v6));
+        foreach (var kv in v6 ? table6 : table) into[kv.Key] = kv.Value;
+    }
+    var cache = new PortOwnerCache(Fill, () => clock);
+    Check("Erster Aufruf liest die Tabelle", cache.GetPid(IpProto.Tcp, 50000, false, true) == 4242 && cache.Reads == 1);
+    Check("IPv4-Paket mit Treffer liest nur die IPv4-Tabelle", fills.Count == 1 && fills[0] == (true, false));
+    Check("Treffer innerhalb 50 ms ohne erneutes Lesen", cache.GetPid(IpProto.Tcp, 50000, false, true) == 4242 && cache.Reads == 1);
     table[50001] = 777;
     clock += 2;
-    Check("Neuer Port → Tabelle wird neu gelesen", cache.GetPid(IpProto.Tcp, 50001, true) == 777 && cache.Reads == 2);
-    Check("Unbekannter Port in derselben ms → kein Dauer-Lesen", cache.GetPid(IpProto.Tcp, 59999, true) == null && cache.Reads == 2);
+    Check("Neuer Port → Tabelle wird neu gelesen", cache.GetPid(IpProto.Tcp, 50001, false, true) == 777 && cache.Reads == 2);
+    Check("Unbekannter Port → auch die IPv6-Tabelle wird geprüft", cache.GetPid(IpProto.Tcp, 59999, false, true) == null && cache.Reads == 3);
+    Check("Unbekannter Port in derselben ms → kein Dauer-Lesen", cache.GetPid(IpProto.Tcp, 59998, false, true) == null && cache.Reads == 3);
     table[50000] = 9999; // Port von anderem Prozess wiederverwendet
     clock += 100;
-    Check("Neue TCP-Verbindung nach > 50 ms → frisch geprüft", cache.GetPid(IpProto.Tcp, 50000, true) == 9999);
-    Check("UDP hat eigene Tabelle", cache.GetPid(IpProto.Udp, 50000, false) == 9999 && cache.Reads == 4);
-    var cache2 = new PortOwnerCache(_ => new Dictionary<ushort, int> { [1] = 5 }, () => 0);
-    Check("Funktioniert auch direkt nach dem Systemstart (Uhr = 0)", cache2.GetPid(IpProto.Tcp, 1, true) == 5);
+    Check("Neue TCP-Verbindung nach > 50 ms → frisch geprüft", cache.GetPid(IpProto.Tcp, 50000, false, true) == 9999 && cache.Reads == 4);
+    Check("UDP hat eigene Tabelle", cache.GetPid(IpProto.Udp, 50000, false, false) == 9999 && cache.Reads == 5);
+    table6[61000] = 3131; // Java: UDP-Socket "::" (dual-stack) steht nur in der IPv6-Tabelle
+    Check("Java-Dual-Stack: Port nur in der IPv6-Tabelle wird auch für IPv4-Pakete gefunden",
+        cache.GetPid(IpProto.Udp, 61000, false, false) == 3131 && cache.Reads == 6);
+    table6[62000] = 2020;
+    Check("IPv6-Paket schaut zuerst in die IPv6-Tabelle",
+        cache.GetPid(IpProto.Tcp, 62000, true, false) == 2020 && cache.Reads == 7 && fills[^1] == (true, true));
+    var cache2 = new PortOwnerCache((_, _, into) => into[1] = 5, () => 0);
+    Check("Funktioniert auch direkt nach dem Systemstart (Uhr = 0)", cache2.GetPid(IpProto.Tcp, 1, false, true) == 5);
+
+    if (OperatingSystem.IsWindows())
+    {
+        // Echte Windows-Tabelle, nur eigene Sockets auf 127.0.0.1 / [::]
+        var real = new RatioVPN.Core.Windows.WindowsProcessLookup();
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        using var client = new System.Net.Sockets.TcpClient();
+        client.Connect(System.Net.IPAddress.Loopback, ((System.Net.IPEndPoint)listener.LocalEndpoint).Port);
+        var tcpPort = (ushort)((System.Net.IPEndPoint)client.Client.LocalEndPoint!).Port;
+        Check("Echte Tabelle: eigene TCP-Verbindung wird dem eigenen Prozess zugeordnet",
+            real.GetPid(IpProto.Tcp, tcpPort, false, true) == Environment.ProcessId);
+        using var dual = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetworkV6, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp) { DualMode = true };
+        dual.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.IPv6Any, 0));
+        var udpPort = (ushort)((System.Net.IPEndPoint)dual.LocalEndPoint!).Port;
+        Check("Echte Tabelle: Dual-Stack-UDP (wie Java) wird auch für IPv4 gefunden",
+            real.GetPid(IpProto.Udp, udpPort, false, true) == Environment.ProcessId);
+        listener.Stop();
+    }
 }
 
 // ---------------------------------------------------------------- Mehrere Fenster
@@ -522,7 +556,7 @@ sealed class FakeLookup : IProcessLookup
 {
     public readonly ConcurrentDictionary<(byte, ushort), int> Ports = new();
     public readonly ConcurrentDictionary<int, string> Exe = new();
-    public int? GetPid(byte protocol, ushort localPort, bool requireFresh) => Ports.TryGetValue((protocol, localPort), out var p) ? p : null;
+    public int? GetPid(byte protocol, ushort localPort, bool v6, bool requireFresh) => Ports.TryGetValue((protocol, localPort), out var p) ? p : null;
     public string? GetExePath(int pid) => Exe.TryGetValue(pid, out var e) ? e : null;
 }
 

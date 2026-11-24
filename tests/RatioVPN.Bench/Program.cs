@@ -95,7 +95,7 @@ uint lan = Ip("192.168.1.50"), remote = Ip("93.184.216.34");
 if (OperatingSystem.IsWindows())
 {
     var lookup = new RatioVPN.Core.Windows.WindowsProcessLookup();
-    MeasureWithSetup("table-read", 300, () => Thread.Sleep(2), () => lookup.GetPid(IpProto.Tcp, 1, requireFresh: true));
+    MeasureWithSetup("table-read", 300, () => Thread.Sleep(2), () => lookup.GetPid(IpProto.Tcp, 1, false, requireFresh: true));
 }
 return 0;
 
@@ -175,7 +175,7 @@ sealed class BenchLookup : IProcessLookup
 {
     public readonly ConcurrentDictionary<(byte, ushort), int> Ports = new();
     public readonly ConcurrentDictionary<int, string> Exe = new();
-    public int? GetPid(byte protocol, ushort localPort, bool requireFresh) => Ports.TryGetValue((protocol, localPort), out var p) ? p : null;
+    public int? GetPid(byte protocol, ushort localPort, bool v6, bool requireFresh) => Ports.TryGetValue((protocol, localPort), out var p) ? p : null;
     public string? GetExePath(int pid) => Exe.TryGetValue(pid, out var e) ? e : null;
 }
 

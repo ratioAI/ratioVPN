@@ -7,8 +7,8 @@ namespace RatioVPN.Core.Routing;
 /// <summary>Findet heraus, welchem Prozess ein lokaler Port gehört.</summary>
 public interface IProcessLookup
 {
-    /// <summary>PID des Besitzers von (Protokoll, lokaler Port) oder null.</summary>
-    int? GetPid(byte protocol, ushort localPort, bool requireFresh);
+    /// <summary>PID des Besitzers von (Protokoll, lokaler Port) oder null. v6 = Adressfamilie des Pakets.</summary>
+    int? GetPid(byte protocol, ushort localPort, bool v6, bool requireFresh);
     /// <summary>Vollständiger Pfad der .exe zu einer PID oder null.</summary>
     string? GetExePath(int pid);
 }
@@ -58,7 +58,7 @@ public sealed class RoutingEngine : IDisposable
     private readonly IPacketInjector _injector;
     private readonly ConcurrentDictionary<string, WgTunnel> _tunnels = new();
     private readonly ConcurrentDictionary<string, bool> _disabled = new();
-    private readonly ConcurrentDictionary<(byte, ushort), PortEntry> _ports = new();
+    private readonly ConcurrentDictionary<(byte, ushort, int), PortEntry> _ports = new();
     private readonly ConcurrentDictionary<(string, byte, ushort), NatEntry> _nat = new();
     private readonly ConcurrentDictionary<int, (string? Path, long Time)> _exeCache = new();
     private volatile IReadOnlyDictionary<string, string> _rules = new Dictionary<string, string>();
@@ -212,7 +212,7 @@ public sealed class RoutingEngine : IDisposable
         var rules = _rules;
         if (rules.Count == 0 && _pidRules.Count == 0) return null;
 
-        var key = (info.Protocol, info.SrcPort);
+        var key = (info.Protocol, info.SrcPort, info.Version);
         long now = Environment.TickCount64;
         int ver = Volatile.Read(ref _ruleVersion);
         bool newTcp = info.Protocol == IpProto.Tcp && (info.TcpFlags & TcpFlags.Syn) != 0 && (info.TcpFlags & TcpFlags.Ack) == 0;
@@ -234,7 +234,7 @@ public sealed class RoutingEngine : IDisposable
             }
         }
 
-        int pid = _lookup.GetPid(info.Protocol, info.SrcPort, requireFresh: true) ?? 0;
+        int pid = _lookup.GetPid(info.Protocol, info.SrcPort, info.Version == 6, requireFresh: true) ?? 0;
         var entry = new PortEntry
         {
             Pid = pid,
