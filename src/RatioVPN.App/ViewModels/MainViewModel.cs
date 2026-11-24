@@ -45,6 +45,7 @@ public sealed class MainViewModel : ObservableObject
             if (!Set(ref _currentPage, value)) return;
             Raise(nameof(PageTitle));
             Raise(nameof(PageSubtitle));
+            if (value == Page.Stats) Stats?.Refresh();
         }
     }
     public VpnController Controller { get; }
@@ -88,6 +89,24 @@ public sealed class MainViewModel : ObservableObject
     public AutoPilot AutoPilot { get; }
     public CockpitViewModel Cockpit { get; }
     public RulesViewModel Rules { get; }
+    public StatsViewModel Stats { get; }
+    private readonly DispatcherTimer _trafficTimer;
+    private readonly Dictionary<string, (long Rx, long Tx)> _lastTraffic = new();
+    private readonly System.Diagnostics.Stopwatch _sinceStatsRefresh = System.Diagnostics.Stopwatch.StartNew();
+
+    /// <summary>Datenmenge je Verbindung seit der letzten Probe in die Statistik schreiben (alle 5 min).</summary>
+    private void SampleTraffic()
+    {
+        if (_options.Stats == null) return;
+        foreach (var t in Controller.Tunnels)
+        {
+            var now = (t.RxBytes, t.TxBytes);
+            var last = _lastTraffic.GetValueOrDefault(t.Id);
+            _lastTraffic[t.Id] = now;
+            long rx = Math.Max(0, now.RxBytes - last.Rx), tx = Math.Max(0, now.TxBytes - last.Tx);
+            if (rx + tx > 0) _options.Stats.Add(new RatioVPN.Core.Stats.TrafficSample(DateTime.Now, t.Name, rx, tx));
+        }
+    }
     /// <summary>Prüft öffentliche IPs (null in der Vorschau).</summary>
     public IpCheckScheduler? IpChecks { get; }
     public ICommand CheckAllIpsCommand { get; }
@@ -181,6 +200,7 @@ public sealed class MainViewModel : ObservableObject
         {
             History.Insert(0, $"{e.Time:dd.MM. HH:mm:ss}   {e.Message}");
             Cockpit.AddEvent(e);
+            _options.Stats?.Add(new RatioVPN.Core.Stats.StatEvent(e.Time, e.Kind, e.TunnelName, null, e.Message));
             while (History.Count > 40) History.RemoveAt(History.Count - 1);
             Raise(nameof(HasHistory));
         }));
@@ -213,6 +233,7 @@ public sealed class MainViewModel : ObservableObject
         AutoPilot = new AutoPilot(controller);
         Cockpit = new CockpitViewModel(this);
         Rules = new RulesViewModel(this);
+        Stats = new StatsViewModel(_options.Stats);
         NavigateCommand = new RelayCommand(p =>
         {
             if (p is Page page) CurrentPage = page;
@@ -240,6 +261,9 @@ public sealed class MainViewModel : ObservableObject
         _fastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _fastTimer.Tick += (_, _) => RefreshFast();
         _fastTimer.Start();
+        _trafficTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMinutes(5) };
+        _trafficTimer.Tick += (_, _) => SampleTraffic();
+        _trafficTimer.Start();
         _scanTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
         _scanTimer.Tick += (_, _) => RunAutoPilot();
         _scanTimer.Start();
@@ -510,6 +534,11 @@ public sealed class MainViewModel : ObservableObject
             : $"{connected} von {Tunnels.Count} Verbindungen aktiv · {assigned} Programm(e) über VPN";
         UpdateShellStatus(connected);
         Cockpit.Refresh(_lastSnapshot);
+        if (CurrentPage == Page.Stats && _sinceStatsRefresh.Elapsed > TimeSpan.FromSeconds(60))
+        {
+            _sinceStatsRefresh.Restart();
+            Stats.Refresh();
+        }
     }
 
     // ---------------- Kopf / Seitenleiste ----------------
@@ -576,6 +605,8 @@ public sealed class MainViewModel : ObservableObject
     {
         _fastTimer.Stop();
         _scanTimer.Stop();
+        _trafficTimer.Stop();
+        SampleTraffic();
         _discord.Dispose();
     }
 }

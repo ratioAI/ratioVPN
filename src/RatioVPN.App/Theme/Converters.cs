@@ -52,3 +52,16 @@ public sealed class CountToVisibilityConverter : IValueConverter
     }
     public object ConvertBack(object value, Type t, object p, CultureInfo c) => Binding.DoNothing;
 }
+
+/// <summary>Anteil 0..1 → Spaltenbreite in Sternen (Parameter "rest" = 1 − Anteil), für einfache Balken.</summary>
+public sealed class FractionToStarConverter : IValueConverter
+{
+    public static readonly FractionToStarConverter Instance = new();
+    public object Convert(object value, Type t, object p, CultureInfo c)
+    {
+        double f = value is double d ? Math.Clamp(d, 0, 1) : 0;
+        if (p?.ToString() == "rest") f = 1 - f;
+        return new GridLength(Math.Max(f, 0.0001), GridUnitType.Star);
+    }
+    public object ConvertBack(object value, Type t, object p, CultureInfo c) => Binding.DoNothing;
+}
