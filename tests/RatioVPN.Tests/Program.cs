@@ -706,6 +706,64 @@ Console.WriteLine("Automatik: Internet-Ausfall und Zuverlässigkeit:");
     try { Directory.Delete(dir, true); } catch { }
 }
 
+// ---------------------------------------------------------------- Kick-Erkennung
+Console.WriteLine("Automatik: Kick-Erkennung über Verkehr pro Prozess:");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var lookup = new FakeLookup();
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "settings.json")), new PlainProtector(), lookup, null);
+    c.Start();
+    var a = c.ImportConfig("A.conf", TestConf());
+    var b = c.ImportConfig("B.conf", TestConf());
+    foreach (var t in new[] { a, b }) { t.Start(); t.ForceStateForTest(TunnelState.Connected); }
+    using var s1 = StartSleeper();
+    using var s2 = StartSleeper();
+    const string javaw = @"C:\Java\javaw.exe";
+    lookup.Exe[s1.Id] = javaw; lookup.Ports[(IpProto.Tcp, 50601)] = s1.Id;
+    lookup.Exe[s2.Id] = javaw; lookup.Ports[(IpProto.Tcp, 50602)] = s2.Id;
+    uint seq = 1;
+    void Traffic(ushort port) => c.Engine.HandleOutbound(BuildTcp(Ip("192.168.1.50"), Ip("5.6.7.8"), port, 25565, seq++, 1, TcpFlags.Ack, new byte[50]), 1, 0);
+    var now = new DateTime(2026, 11, 24, 12, 0, 0);
+    var ap = new AutoPilot(c, () => now);
+    var events = new List<AutoPilotEvent>();
+    ap.EventRaised += events.Add;
+    var w1 = new WindowInfo(s1.Id, javaw, "Minecraft* 26.2");
+    var w2 = new WindowInfo(s2.Id, javaw, "Minecraft* 26.2 | NRC 26.2");
+
+    ap.Step(new[] { w1 });
+    now += TimeSpan.FromSeconds(120);
+    ap.Step(new[] { w1 });
+    Check("Kein Verkehr seit Start → keine Kick-Meldung", events.All(e => e.Kind != AutoPilotEventKind.Kicked));
+
+    Traffic(50601);
+    ap.Step(new[] { w1 });
+    now += TimeSpan.FromSeconds(61);
+    ap.Step(new[] { w1 });
+    now += TimeSpan.FromSeconds(10);
+    ap.Step(new[] { w1 });
+    var kicks = events.Where(e => e.Kind == AutoPilotEventKind.Kicked).ToList();
+    Check("Verkehr bricht 61 s ab → genau eine Kick-Meldung", kicks.Count == 1 && kicks[0].Pid == s1.Id && kicks[0].Important,
+        string.Join(" | ", events.Select(e => e.Kind)));
+
+    Traffic(50601);
+    ap.Step(new[] { w1 });
+    Check("Verkehr kommt zurück → wieder verbunden", events.Count(e => e.Kind == AutoPilotEventKind.Reconnected && e.Pid == s1.Id) == 1);
+
+    ap.Step(new[] { w1, w2 });
+    Traffic(50602);
+    ap.Step(new[] { w1, w2 });
+    events.Clear();
+    try { s2.Kill(); s2.WaitForExit(2000); } catch { }
+    now += TimeSpan.FromSeconds(61);
+    Traffic(50601);
+    ap.Step(new[] { w1 });
+    Check("Prozess beendet → kein Kick", events.All(e => !(e.Kind == AutoPilotEventKind.Kicked && e.Pid == s2.Id)));
+
+    foreach (var t in new[] { a, b }) t.Stop();
+    try { s1.Kill(); } catch { }
+    try { Directory.Delete(dir, true); } catch { }
+}
+
 static Process StartSleeper()
 {
     var exe = Environment.ProcessPath!;

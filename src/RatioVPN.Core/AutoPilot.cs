@@ -55,6 +55,18 @@ public sealed class AutoPilot
     /// <summary>Verbindungen, die während eines Internet-Ausfalls ausfielen: ihr „wieder da“ wird nicht einzeln gemeldet.</summary>
     private readonly HashSet<string> _outageTunnels = new();
 
+    private sealed class TrafficWatch
+    {
+        public long LastCount;
+        public DateTime LastChange;
+        public bool HadTraffic;
+        public bool Kicked;
+    }
+    private readonly Dictionary<int, TrafficWatch> _watch = new();
+
+    /// <summary>So lange ohne Verkehr gilt eine überwachte Kopie als vom Server getrennt.</summary>
+    public static readonly TimeSpan KickAfter = TimeSpan.FromSeconds(60);
+
     /// <summary>Anteil ausgefallener Verbindungen, ab dem das eigene Internet als weg gilt.</summary>
     public const double InternetDownShare = 0.75;
 
@@ -201,6 +213,7 @@ public sealed class AutoPilot
         {
             HoldDuringOutage(units);
             foreach (var pid in _lastNotice.Keys.Where(p => !managedPids.Contains(p)).ToList()) _lastNotice.Remove(pid);
+            WatchTraffic(instances);
             UpdateInstances(instances);
             return;
         }
@@ -288,7 +301,48 @@ public sealed class AutoPilot
 
         foreach (var pid in _lastNotice.Keys.Where(p => !managedPids.Contains(p)).ToList())
             _lastNotice.Remove(pid);
+        WatchTraffic(instances);
         UpdateInstances(instances);
+    }
+
+    /// <summary>
+    /// Kick-Erkennung: Hatte eine überwachte Kopie Verkehr und seit <see cref="KickAfter"/> keinen mehr, ist sie
+    /// vermutlich vom Server getrennt. Während „Internet weg“ wird nichts gemeldet.
+    /// </summary>
+    private void WatchTraffic(List<Inst> instances)
+    {
+        var now = _clock();
+        var seen = new HashSet<int>();
+        foreach (var i in instances)
+        {
+            if (!i.Rule.WatchTraffic) continue;
+            seen.Add(i.Pid);
+            long count = _c.Engine.TryGetTraffic(i.Pid, out var traffic) ? traffic.Packets : 0;
+            if (!_watch.TryGetValue(i.Pid, out var w))
+            {
+                _watch[i.Pid] = new TrafficWatch { LastCount = count, LastChange = now, HadTraffic = count > 0 };
+                continue;
+            }
+            var tunnel = _c.WindowRuleFor(i.Pid);
+            if (count != w.LastCount)
+            {
+                w.LastCount = count;
+                w.LastChange = now;
+                w.HadTraffic = true;
+                if (w.Kicked)
+                {
+                    w.Kicked = false;
+                    Raise($"{Label(i)}: wieder verbunden", true, AutoPilotEventKind.Reconnected, IsTunnelId(tunnel) ? tunnel : null, i.Pid);
+                }
+            }
+            else if (w.HadTraffic && !w.Kicked && !InternetDown && now - w.LastChange > KickAfter)
+            {
+                w.Kicked = true;
+                Raise($"{Label(i)}: keine Verbindung mehr zum Server (gekickt?)", true, AutoPilotEventKind.Kicked,
+                    IsTunnelId(tunnel) ? tunnel : null, i.Pid);
+            }
+        }
+        foreach (var pid in _watch.Keys.Where(p => !seen.Contains(p)).ToList()) _watch.Remove(pid);
     }
 
     /// <summary>Ein Eintrag je Prozess: die erste passende Regel (über Fenster und Prozessliste) gewinnt.</summary>
