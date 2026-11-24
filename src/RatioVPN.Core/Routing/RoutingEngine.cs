@@ -105,6 +105,9 @@ public sealed class RoutingEngine : IDisposable
     /// <summary>Markiert in Prozess-Regeln "direkt ohne VPN" (überschreibt eine Programm-Regel).</summary>
     public const string DirectRule = "";
 
+    /// <summary>Markiert in Prozess-Regeln "blockiert": kein Internet, nur LAN (nie die echte IP).</summary>
+    public const string BlockRule = "!";
+
     public void AddTunnel(WgTunnel t)
     {
         _tunnels[t.Id] = t;
@@ -141,6 +144,14 @@ public sealed class RoutingEngine : IDisposable
 
         var tunnelId = ResolveTunnel(info);
         if (tunnelId == null) return OutboundVerdict.Pass;
+
+        // Blockiert (z. B. von der Automatik, wenn keine Verbindung frei ist): nur LAN erlaubt.
+        if (tunnelId == BlockRule)
+        {
+            if (info.Version == 4 && CidrSet.IsLocalV4(info.DstV4)) return OutboundVerdict.Pass;
+            Interlocked.Increment(ref _dropped);
+            return OutboundVerdict.Drop;
+        }
 
         // IPv6 eines VPN-Programms blockieren, damit es auf IPv4 (durch den Tunnel) ausweicht.
         if (info.Version == 6) { Interlocked.Increment(ref _dropped); return OutboundVerdict.Drop; }

@@ -28,12 +28,24 @@ public sealed class WindowRuleEntry
     public long StartTimeTicks { get; set; }
     public string ExePath { get; set; } = "";
     public string Title { get; set; } = "";
-    /// <summary>Tunnel-ID oder "" für "ohne VPN".</summary>
+    /// <summary>Tunnel-ID, "" für "ohne VPN" oder "!" für "blockiert".</summary>
     public string TunnelId { get; set; } = "";
+}
+
+/// <summary>Einstellungen der Automatik (unbeaufsichtigter Betrieb).</summary>
+public sealed class AutoPilotSettings
+{
+    public bool Enabled { get; set; } = true;
+    /// <summary>Regulärer Ausdruck für Fenstertitel, die automatisch eine eigene Verbindung bekommen.</summary>
+    public string TitlePattern { get; set; } = @"Minecraft\*?\s*26\.2(?!\d)";
+    public string DiscordWebhookUrl { get; set; } = "";
+    /// <summary>Nach so vielen Sekunden ohne Antwort gilt eine Verbindung als ausgefallen (10–300).</summary>
+    public int FailAfterSeconds { get; set; } = 25;
 }
 
 public sealed class AppSettings
 {
+    public AutoPilotSettings AutoPilot { get; set; } = new();
     public List<WindowRuleEntry> WindowRules { get; set; } = new();
     public List<TunnelEntry> Tunnels { get; set; } = new();
     public List<RuleEntry> Rules { get; set; } = new();

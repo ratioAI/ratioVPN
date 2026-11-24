@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
@@ -341,6 +342,93 @@ public sealed class MainViewModel : ObservableObject
         set { Controller.KillSwitch = value; Raise(); foreach (var p in Programs) p.RefreshStatus(); }
     }
 
+    // ---------------- Automatik ----------------
+
+    public AutoPilot AutoPilot { get; }
+    private readonly DiscordNotifier _discord;
+    private readonly DispatcherTimer _autoTimer;
+
+    public ObservableCollection<string> History { get; } = new();
+    public bool HasHistory => History.Count > 0;
+    public ICommand TestDiscordCommand { get; }
+
+    public bool AutoPilotEnabled
+    {
+        get => Controller.Settings.AutoPilot.Enabled;
+        set { Controller.Settings.AutoPilot.Enabled = value; Controller.SaveSettings(); Raise(); }
+    }
+
+    private string _patternError = "";
+    public string PatternError { get => _patternError; private set => Set(ref _patternError, value); }
+
+    public string AutoPilotPattern
+    {
+        get => Controller.Settings.AutoPilot.TitlePattern;
+        set
+        {
+            try
+            {
+                _ = new Regex(value ?? "");
+                PatternError = "";
+                Controller.Settings.AutoPilot.TitlePattern = value ?? "";
+                Controller.SaveSettings();
+            }
+            catch (ArgumentException)
+            {
+                PatternError = "Ungültiges Muster – wird nicht übernommen.";
+            }
+            Raise();
+        }
+    }
+
+    public string DiscordWebhook
+    {
+        get => Controller.Settings.AutoPilot.DiscordWebhookUrl;
+        set
+        {
+            var url = (value ?? "").Trim();
+            Controller.Settings.AutoPilot.DiscordWebhookUrl = url;
+            Controller.SaveSettings();
+            DiscordStatus = url.Length == 0 || DiscordNotifier.IsValidUrl(url) ? "" : "Das sieht nicht wie eine Discord-Webhook-URL aus.";
+            Raise();
+        }
+    }
+
+    private string _discordStatus = "";
+    public string DiscordStatus { get => _discordStatus; private set => Set(ref _discordStatus, value); }
+
+    private async Task TestDiscord()
+    {
+        DiscordStatus = "Sende …";
+        DiscordStatus = await _discord.SendNowAsync($"✅ Test von Ratio VPN ({Environment.MachineName}) – Benachrichtigungen funktionieren.")
+                        ?? "Testnachricht gesendet – schau in Discord nach.";
+    }
+
+    private void RunAutoPilot()
+    {
+        try
+        {
+            var windows = WindowEnumerator.GetOpenWindows().Select(w => new WindowInfo(w.Pid, w.ExePath, w.Title)).ToList();
+            AutoPilot.Step(windows);
+        }
+        catch (Exception ex)
+        {
+            App.Log("Automatik: " + ex);
+        }
+    }
+
+    private void OnAutoPilotEvent(AutoPilotEvent e)
+    {
+        if (e.Important) _discord.Post(e.Message);
+        Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            History.Insert(0, $"{e.Time:dd.MM. HH:mm:ss}   {e.Message}");
+            while (History.Count > 40) History.RemoveAt(History.Count - 1);
+            Raise(nameof(HasHistory));
+        }));
+        App.Log("Automatik: " + e.Message);
+    }
+
     public bool MinimizeToTray
     {
         get => Controller.Settings.MinimizeToTray;
@@ -363,7 +451,11 @@ public sealed class MainViewModel : ObservableObject
     public MainViewModel(VpnController controller)
     {
         Controller = controller;
-        ToggleTunnelCommand = new RelayCommand(p => { if (p is TunnelItem t) { Controller.SetTunnelEnabled(t.Id, !t.Enabled); RefreshFast(); } });
+        AutoPilot = new AutoPilot(controller);
+        _discord = new DiscordNotifier(() => Controller.Settings.AutoPilot.DiscordWebhookUrl);
+        TestDiscordCommand = new RelayCommand(async _ => await TestDiscord());
+        AutoPilot.EventRaised += OnAutoPilotEvent;
+        ToggleTunnelCommand =new RelayCommand(p => { if (p is TunnelItem t) { Controller.SetTunnelEnabled(t.Id, !t.Enabled); RefreshFast(); } });
         RemoveTunnelCommand = new RelayCommand(p => RemoveTunnel(p as TunnelItem));
         CheckIpCommand = new RelayCommand(async p => await CheckIp(p as TunnelItem), p => p is TunnelItem t && !t.CheckingIp);
         RemoveRuleCommand = new RelayCommand(p => { if (p is ProgramItem pi) pi.TunnelId = null; });
@@ -381,6 +473,9 @@ public sealed class MainViewModel : ObservableObject
         _windowTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         _windowTimer.Tick += (_, _) => { Controller.PruneWindowRules(); RefreshPrograms(); };
         _windowTimer.Start();
+        _autoTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
+        _autoTimer.Tick += (_, _) => RunAutoPilot();
+        _autoTimer.Start();
     }
 
     // ---------------- Verbindungen ----------------
@@ -410,7 +505,12 @@ public sealed class MainViewModel : ObservableObject
                 if (existing == null) Options.Insert(Math.Min(i, Options.Count), new TunnelOption(wanted[i].Id, wanted[i].Name));
                 else existing.Name = wanted[i].Name;
             }
-            var wantedW = new List<(string? Id, string Name)> { (WindowItem.Inherit, "Wie das Programm"), ("", "Ohne VPN (direkt)") };
+            var wantedW = new List<(string? Id, string Name)>
+            {
+                (WindowItem.Inherit, "Wie das Programm"),
+                ("", "Ohne VPN (direkt)"),
+                (RatioVPN.Core.Routing.RoutingEngine.BlockRule, "Blockiert (kein Internet)"),
+            };
             wantedW.AddRange(Controller.Tunnels.Select(t => ((string?)t.Id, t.Name)));
             for (int i = WindowOptions.Count - 1; i >= 0; i--)
                 if (!wantedW.Any(w => w.Id == WindowOptions[i].Id)) WindowOptions.RemoveAt(i);
@@ -490,6 +590,7 @@ public sealed class MainViewModel : ObservableObject
     public (Brush, string) StatusFor(string? tunnelId)
     {
         if (tunnelId == null) return (Palette.Gray, "Direkt");
+        if (tunnelId == RatioVPN.Core.Routing.RoutingEngine.BlockRule) return (Palette.Red, "Blockiert – wartet");
         var t = Controller.GetTunnel(tunnelId);
         if (t == null) return (Palette.Gray, "Direkt");
         if (!Controller.IsEnabled(tunnelId))
@@ -643,6 +744,8 @@ public sealed class MainViewModel : ObservableObject
     public void Stop()
     {
         _fastTimer.Stop();
+        _autoTimer.Stop();
+        _discord.Dispose();
         _windowTimer.Stop();
     }
 }

@@ -1,14 +1,20 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using RatioVPN.Core;
 using RatioVPN.Core.Crypto;
 using RatioVPN.Core.Net;
 using RatioVPN.Core.Routing;
+using RatioVPN.Core.Settings;
 using RatioVPN.Core.WireGuard;
 
 // Einfacher Testläufer ohne NuGet-Abhängigkeiten.
 // Aufruf: dotnet run [pfad/zu/client.conf]   (mit .conf → zusätzlich End-to-End gegen echten WireGuard-Server)
+
+// Hilfsprozess für die Automatik-Tests (ein zweites "Fenster" mit echter Prozess-ID).
+if (args.Length == 1 && args[0] == "--sleep") { Thread.Sleep(60_000); return 0; }
 
 int passed = 0, failed = 0;
 void Check(string name, bool ok, string? detail = null)
@@ -271,6 +277,125 @@ Console.WriteLine("Zwei Fenster desselben Programms (z. B. zwei javaw.exe):");
     var v2b = engine.HandleOutbound(BuildTcp(lan, dst, 50002, 25565, 2, 0, TcpFlags.Ack, Array.Empty<byte>()), 1, 0);
     Check("Fenster-Regel entfernt → wieder wie das Programm (DE)", v2b == OutboundVerdict.Tunneled && engine.ActiveFlows("de") == 2);
     de.Stop(); nl.Stop(); engine.Dispose();
+}
+
+// Testkonfiguration: Server 127.0.0.1:9 (Discard-Port), es geht nichts ins echte Netz.
+string TestConf() => $"[Interface]\nPrivateKey = {Convert.ToBase64String(X25519.GeneratePrivateKey())}\nAddress = 10.2.0.2/32\n[Peer]\nPublicKey = {Convert.ToBase64String(X25519.PublicKey(X25519.GeneratePrivateKey()))}\nAllowedIPs = 0.0.0.0/0\nEndpoint = 127.0.0.1:9\n";
+
+// ---------------------------------------------------------------- Blockiert
+Console.WriteLine("Blockierte Fenster (Regel \"!\"):");
+{
+    var lookup = new FakeLookup();
+    var engine = new RoutingEngine(lookup, new FakeInjector());
+    lookup.Exe[6001] = @"C:\Games\javaw.exe";
+    lookup.Ports[(IpProto.Tcp, 51001)] = 6001;
+    engine.SetPidRules(new[] { new KeyValuePair<int, string>(6001, RoutingEngine.BlockRule) });
+    var inet = engine.HandleOutbound(BuildTcp(Ip("192.168.1.50"), Ip("1.2.3.4"), 51001, 25565, 1, 0, TcpFlags.Syn, Array.Empty<byte>()), 1, 0);
+    var lanV = engine.HandleOutbound(BuildTcp(Ip("192.168.1.50"), Ip("192.168.1.1"), 51001, 80, 1, 0, TcpFlags.Syn, Array.Empty<byte>()), 1, 0);
+    Check("Blockiertes Fenster kommt nicht ins Internet (auch nicht direkt)", inet == OutboundVerdict.Drop);
+    Check("Blockiertes Fenster erreicht weiter das LAN", lanV == OutboundVerdict.Pass);
+    engine.Dispose();
+}
+
+// ---------------------------------------------------------------- Ausfall-Erkennung
+Console.WriteLine("Ausfall-Erkennung einer Verbindung:");
+{
+    var t = new WgTunnel("x", "X", WgConfig.Parse(TestConf()));
+    var limit = TimeSpan.FromSeconds(25);
+    t.ForceStateForTest(TunnelState.Connected);
+    Check("Verbunden → nicht ausgefallen", !t.IsUnresponsive(limit));
+    t.ForceStateForTest(TunnelState.Connecting, handshakePending: true, pendingFor: TimeSpan.FromSeconds(10));
+    Check("Handshake wartet seit 10 s → noch nicht ausgefallen", !t.IsUnresponsive(limit));
+    t.ForceStateForTest(TunnelState.Connecting, handshakePending: true, pendingFor: TimeSpan.FromSeconds(40));
+    Check("Handshake wartet seit 40 s → ausgefallen", t.IsUnresponsive(limit));
+    t.ForceStateForTest(TunnelState.Error);
+    Check("Fehlerzustand → ausgefallen", t.IsUnresponsive(limit));
+}
+
+// ---------------------------------------------------------------- Einstellungen + Discord
+Console.WriteLine("Automatik-Einstellungen und Discord:");
+{
+    var old = JsonSerializer.Deserialize<AppSettings>("{\"KillSwitch\":true,\"Tunnels\":[]}")!;
+    Check("Alte Einstellungen ohne Automatik → Standardwerte", old.AutoPilot.Enabled && old.AutoPilot.FailAfterSeconds == 25 && old.AutoPilot.TitlePattern.Length > 0);
+    var saved = JsonSerializer.Deserialize<AppSettings>("{\"AutoPilot\":{\"Enabled\":false,\"TitlePattern\":\"abc\",\"DiscordWebhookUrl\":\"u\",\"FailAfterSeconds\":40}}")!;
+    Check("Gespeicherte Automatik-Einstellungen werden gelesen",
+        !saved.AutoPilot.Enabled && saved.AutoPilot.TitlePattern == "abc" && saved.AutoPilot.DiscordWebhookUrl == "u" && saved.AutoPilot.FailAfterSeconds == 40);
+    Check("Discord-Webhook-URLs werden erkannt",
+        DiscordNotifier.IsValidUrl("https://discord.com/api/webhooks/123/abc") && DiscordNotifier.IsValidUrl("https://discordapp.com/api/webhooks/1/x"));
+    Check("Falsche URLs werden abgelehnt",
+        !DiscordNotifier.IsValidUrl("http://discord.com/api/webhooks/1/x") && !DiscordNotifier.IsValidUrl("https://example.com/api/webhooks/1/x")
+        && !DiscordNotifier.IsValidUrl("https://discord.com/channels/1/2") && !DiscordNotifier.IsValidUrl("kein link"));
+}
+
+// ---------------------------------------------------------------- Automatik
+Console.WriteLine("Automatik (jedes Fenster eine eigene Verbindung, Wechsel bei Ausfall):");
+{
+    // Eigene Einstellungsdatei im Temp-Ordner – niemals die echte in %APPDATA%.
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "settings.json")), new PlainProtector(), new FakeLookup(), null);
+    c.Start();
+    var a = c.ImportConfig("A.conf", TestConf());
+    var b = c.ImportConfig("B.conf", TestConf());
+    var cc = c.ImportConfig("C.conf", TestConf());
+    void Ready(WgTunnel t) => t.ForceStateForTest(TunnelState.Connected);
+    void Fail(WgTunnel t) => t.ForceStateForTest(TunnelState.Error);
+    foreach (var t in new[] { a, b, cc }) { t.Start(); Ready(t); }
+
+    using var sleeper = StartSleeper();
+    int me = Environment.ProcessId, other = sleeper.Id;
+    var ap = new AutoPilot(c);
+    var mc1 = new WindowInfo(me, @"C:\Java\javaw.exe", "Minecraft* 26.2 - Einzelspieler");
+    var mc2 = new WindowInfo(other, @"C:\Java\javaw.exe", "Minecraft 26.2");
+    var chrome = new WindowInfo(424242, @"C:\Chrome\chrome.exe", "Minecraft 26.21 Trailer - YouTube");
+    var windows = new[] { mc1, mc2, chrome };
+
+    Check("Titel-Muster: „Minecraft* 26.2“ ja, „26.21“ und „1.21“ nein",
+        ap.Matches(mc1.Title) && ap.Matches(mc2.Title) && !ap.Matches(chrome.Title) && !ap.Matches("Minecraft 1.21"));
+
+    ap.Step(windows);
+    string? r1 = c.WindowRuleFor(me), r2 = c.WindowRuleFor(other);
+    Check("Zwei Minecraft-Fenster → zwei verschiedene Verbindungen (A und B)",
+        r1 != null && r2 != null && r1 != r2 && new[] { r1, r2 }.All(r => r == a.Id || r == b.Id), $"{r1}/{r2}");
+    Check("Andere Fenster werden nicht angefasst", c.WindowRuleFor(chrome.Pid) == null);
+
+    var lost = c.GetTunnel(r1!)!;
+    Fail(lost);
+    ap.Step(windows);
+    Check("Verbindung fällt aus → Fenster wechselt auf die freie Reserve (C)", c.WindowRuleFor(me) == cc.Id && c.WindowRuleFor(other) == r2);
+    Check("Wechsel steht im Verlauf", ap.History.Any(e => e.Important && e.Message.Contains("gewechselt auf C")));
+
+    Fail(cc);
+    ap.Step(windows);
+    Check("Auch Reserve weg → Fenster wartet, bekommt nie die echte IP", c.WindowRuleFor(me) == cc.Id && c.WindowRuleFor(other) == r2);
+
+    Ready(lost);
+    ap.Step(windows);
+    Check("Verbindung wieder da → Fenster wechselt zurück", c.WindowRuleFor(me) == lost.Id && c.WindowRuleFor(other) == r2);
+
+    c.AssignWindow(me, mc1.ExePath, mc1.Title, null);
+    Fail(a); Fail(b); Fail(cc);
+    ap.Step(new[] { mc1 });
+    Check("Neues Fenster, keine Verbindung frei → blockiert", c.WindowRuleFor(me) == RoutingEngine.BlockRule);
+
+    Ready(a); Ready(b); Ready(cc);
+    ap.Step(new[] { mc1 });
+    var now1 = c.WindowRuleFor(me);
+    Check("Verbindung frei → Blockade aufgehoben, nicht doppelt belegt",
+        now1 != null && now1 != RoutingEngine.BlockRule && now1 != c.WindowRuleFor(other), now1);
+
+    foreach (var t in new[] { a, b, cc }) t.Stop();
+    try { sleeper.Kill(); } catch { }
+    try { Directory.Delete(dir, true); } catch { }
+}
+
+static Process StartSleeper()
+{
+    var exe = Environment.ProcessPath!;
+    var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true };
+    if (Path.GetFileNameWithoutExtension(exe).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+        psi.ArgumentList.Add(typeof(FakeLookup).Assembly.Location);
+    psi.ArgumentList.Add("--sleep");
+    return Process.Start(psi)!;
 }
 
 // ---------------------------------------------------------------- End-to-End

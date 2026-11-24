@@ -175,6 +175,7 @@
             </Border>
 
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+              <StackPanel>
                 <ItemsControl ItemsSource="{Binding Tunnels}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate DataType="{x:Type local:TunnelItem}">
@@ -224,6 +225,21 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <!-- Verlauf der Automatik -->
+                <Border Style="{StaticResource Card}" Visibility="{Binding HasHistory, Converter={StaticResource BoolToVis}}">
+                    <StackPanel>
+                        <TextBlock Text="Verlauf der Automatik" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                        <ItemsControl ItemsSource="{Binding History}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0" Text="{Binding}"/>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+              </StackPanel>
             </ScrollViewer>
         </Grid>
 
@@ -231,6 +247,42 @@
         <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto"
                       Visibility="{Binding IsChecked, ElementName=TabSettings, Converter={StaticResource BoolToVis}}">
             <StackPanel>
+                <!-- Automatik -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="0,0,16,0">
+                                <TextBlock Text="Automatik für unbeaufsichtigten Betrieb" FontSize="14" FontWeight="SemiBold"/>
+                                <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,3,0,0"
+                                           Text="Jedes Fenster, dessen Titel zum Muster passt, bekommt automatisch eine eigene Verbindung – nie doppelt. Fällt eine Verbindung aus, wechselt das Fenster auf eine freie Reserve. Ist keine frei, bleibt es blockiert (nie mit deiner echten IP), bis eine frei wird."/>
+                            </StackPanel>
+                            <CheckBox Grid.Column="1" Style="{StaticResource Switch}" IsChecked="{Binding AutoPilotEnabled}" VerticalAlignment="Top"/>
+                        </Grid>
+                        <TextBlock Text="Fenstertitel-Muster" FontSize="13" Margin="0,14,0,4"/>
+                        <TextBox Style="{StaticResource DarkTextBox}" FontFamily="Cascadia Mono, Consolas"
+                                 Text="{Binding AutoPilotPattern, UpdateSourceTrigger=LostFocus}"/>
+                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0"
+                                   Text="Standard: alle „Minecraft* 26.2“-Fenster. Regulärer Ausdruck, Groß-/Kleinschreibung egal."/>
+                        <TextBlock Foreground="{StaticResource Danger}" FontSize="12" Margin="0,2,0,0" Text="{Binding PatternError}"/>
+                        <TextBlock Text="Discord-Benachrichtigung (Webhook-URL)" FontSize="13" Margin="0,10,0,4"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Style="{StaticResource DarkTextBox}" Text="{Binding DiscordWebhook, UpdateSourceTrigger=LostFocus}"/>
+                            <Button Grid.Column="1" Content="Test senden" Style="{StaticResource BaseButton}" Margin="8,0,0,0"
+                                    Command="{Binding TestDiscordCommand}"/>
+                        </Grid>
+                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" Text="{Binding DiscordStatus}"/>
+                        <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,2,0,0"
+                                   Text="Discord: Servereinstellungen → Integrationen → Webhooks → Neuer Webhook → Kanal wählen → „Webhook-URL kopieren“ und hier einfügen."/>
+                    </StackPanel>
+                </Border>
                 <Border Style="{StaticResource Card}">
                     <Grid>
                         <Grid.ColumnDefinitions>

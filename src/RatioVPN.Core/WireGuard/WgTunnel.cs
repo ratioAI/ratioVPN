@@ -47,6 +47,7 @@ public sealed class WgTunnel : IDisposable
     private DateTime _handshakeStarted = DateTime.MinValue;
     private DateTime _lastInitiationSent = DateTime.MinValue;
     private DateTime _lastSent = DateTime.MinValue;
+    private DateTime _lastDataSent = DateTime.MinValue;
     private DateTime _lastReceived = DateTime.MinValue;
     private DateTime _lastDataReceived = DateTime.MinValue;
     private DateTime _errorSince = DateTime.MinValue;
@@ -122,6 +123,33 @@ public sealed class WgTunnel : IDisposable
     /// <summary>Lokale Port-Nummer des UDP-Sockets (damit der Router eigenen Verkehr erkennt).</summary>
     public int LocalUdpPort => (_socket?.LocalEndPoint as IPEndPoint)?.Port ?? 0;
 
+    /// <summary>Wie lange ein laufender Handshake schon wartet (null = keiner läuft).</summary>
+    public TimeSpan? HandshakePendingFor
+    {
+        get { lock (_lock) return _handshakeInProgress ? DateTime.UtcNow - _handshakeStarted : null; }
+    }
+
+    /// <summary>
+    /// Ausgefallen: Fehlerzustand oder ein Handshake wartet länger als <paramref name="threshold"/>.
+    /// Wird von der Automatik genutzt, um auf eine Reserve-Verbindung zu wechseln.
+    /// </summary>
+    public bool IsUnresponsive(TimeSpan threshold)
+    {
+        if (State == TunnelState.Error) return true;
+        return HandshakePendingFor is { } pending && pending > threshold;
+    }
+
+    internal void ForceStateForTest(TunnelState state, bool handshakePending = false, TimeSpan? pendingFor = null)
+    {
+        lock (_lock)
+        {
+            _handshakeInProgress = handshakePending;
+            _handshakeStarted = DateTime.UtcNow - (pendingFor ?? TimeSpan.Zero);
+            if (state == TunnelState.Error) _errorSince = DateTime.UtcNow;
+            SetState(state, state == TunnelState.Error ? "Test-Fehler" : null);
+        }
+    }
+
     /// <summary>Verschlüsselt ein IP-Paket und schickt es an den Server.</summary>
     public void SendPacket(ReadOnlySpan<byte> ipPacket)
     {
@@ -165,6 +193,7 @@ public sealed class WgTunnel : IDisposable
             sock.SendTo(buf, ep);
             Interlocked.Add(ref _tx, buf.Length);
             _lastSent = DateTime.UtcNow;
+            if (ipPacket.Length > 0) _lastDataSent = _lastSent;
             return true;
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
@@ -284,6 +313,15 @@ public sealed class WgTunnel : IDisposable
                             SendInitiation();
                         }
                         if (State == TunnelState.Connected) SetState(TunnelState.Connecting, null);
+                    }
+                    else if (!_handshakeInProgress && _lastDataSent > _lastReceived
+                             && now - _lastReceived > TimeSpan.FromSeconds(15)
+                             && now - _lastDataSent < TimeSpan.FromSeconds(5))
+                    {
+                        // Wir senden Daten, aber seit 15 s kommt nichts zurück: Server prüfen (neuer Handshake).
+                        _handshakeStarted = now;
+                        _handshakeInProgress = true;
+                        SendInitiation();
                     }
                     else if (!_handshakeInProgress && now - cur.Created >= WgMsg.RekeyAfterTime)
                     {
