@@ -24,6 +24,16 @@
 
 Eigenes Split-Tunneling-VPN für Windows: Du entscheidest **pro Programm**, über welche VPN-Verbindung es ins Internet geht. Chrome kann über Frankfurt laufen, Discord über Amsterdam und alles andere direkt. Bis zu 10 Verbindungen (oder mehr) laufen gleichzeitig, jede mit eigener IP.
 
+## Neu in 2.0
+
+- **Cockpit**: Startseite mit Gesamtstatus und einer Live-Kachel je geschütztem Programm (Verbindung, Latenz, öffentliche IP, Laufzeit, Verkehrskurve) und den letzten Ereignissen.
+- **Automatik für jedes Programm**: Regeln mit Programmdatei und/oder Fenstertitel. Ohne Titel erkennt die Automatik Programme auch ohne Fenster (Skripte, Bots, Dienste). Pro Regel wählbar: *jede Kopie eine eigene Verbindung* oder *alle Kopien eine gemeinsame*. Die alte Minecraft-Einstellung wird automatisch übernommen; sie prüft jetzt zusätzlich `javaw.exe`/`java.exe`, damit z. B. ein YouTube-Video mit „Minecraft 26.2“ im Titel keine Verbindung mehr belegt.
+- **Schlauere Automatik**: erkennt, wenn das eigene Internet weg ist (dann keine unnötigen Wechsel und nur eine Meldung), vergibt unzuverlässige Server als Reserve zuletzt, meldet Kicks (kein Verkehr mehr zum Server) und erkennt Verbindungen mit derselben öffentlichen IP – die werden nie gleichzeitig für getrennte Programme genutzt.
+- **Statistik**: Ausfälle pro Tag, Ranking der Verbindungen, Wechsel, Kicks und Datenmenge – beim ersten Start rückwirkend aus `fehler.log` gefüllt.
+- **Schneller**: Ohne Regeln leitet Ratio VPN gar nichts um. Der Paketweg arbeitet ohne Speicheranforderung pro Paket, die Windows-Verbindungstabelle wird nur noch für die nötige Adressfamilie gelesen (≈ 60 % schneller). Messwerte: `docs/superpowers/bench/`.
+- **Neue Oberfläche**: Navigation links, eigener Fensterrahmen, Mica-Hintergrund ab Windows 11 22H2, Symbol im Infobereich mit Statusfarbe und Automatik-Schalter.
+- **Umstieg**: Die neue `RatioVPN.exe` einfach starten – sie beendet die alte Version automatisch, übernimmt alle Einstellungen und stellt den Autostart auf sich um.
+
 ## So funktioniert es
 
 ```
@@ -63,7 +73,7 @@ Voraussetzung: [.NET SDK 8](https://dotnet.microsoft.com/download/dotnet/8.0) od
 build.bat
 ```
 
-Danach liegt alles in `publish\`: `RatioVPN.exe`, `WinDivert.dll` und `WinDivert64.sys`. Die drei Dateien müssen zusammenbleiben. Alternativ öffnest du `RatioVPN.sln` in Visual Studio 2022 und startest `RatioVPN.App`.
+Danach liegt alles in `publish-2.0\`: `RatioVPN.exe`, `WinDivert.dll` und `WinDivert64.sys`. Die drei Dateien müssen zusammenbleiben. Alternativ öffnest du `RatioVPN.sln` in Visual Studio 2022 und startest `RatioVPN.App`.
 
 ## Benutzung
 
@@ -73,7 +83,10 @@ Danach liegt alles in `publish\`: `RatioVPN.exe`, `WinDivert.dll` und `WinDivert
 4. Mit *IP prüfen* siehst du die öffentliche IP einer Verbindung.
 5. Programme ohne Fenster (z. B. Hintergrund-Clients) fügst du über *+ Programm hinzufügen* hinzu.
 
-Einstellungen: Kill-Switch, Autostart mit Windows (über die Aufgabenplanung, ohne UAC) und Weiterlaufen im Infobereich.
+6. **Automatik**: Regeln für Programme, die automatisch eine Verbindung bekommen sollen (z. B. jedes Minecraft-Fenster eine eigene).
+7. **Cockpit** und **Statistik** zeigen, was gerade läuft und wie zuverlässig die Verbindungen sind.
+
+Einstellungen: Kill-Switch, Autostart mit Windows (über die Aufgabenplanung, ohne UAC), Weiterlaufen im Infobereich, Hinweise bei wichtigen Ereignissen.
 
 ## Wichtig zu wissen
 

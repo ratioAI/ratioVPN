@@ -9,12 +9,16 @@
             <Border CornerRadius="16" BorderBrush="{StaticResource Line}" BorderThickness="1" Background="{StaticResource Surface}">
                 <Grid>
                     <Border CornerRadius="16" Background="{StaticResource HeroGradient}"/>
-                    <Grid Margin="22,20">
+                    <Grid x:Name="Hero" Margin="22,20">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
                         <Grid Width="64" Height="64">
                             <Ellipse Fill="{Binding StatusSoftBrush}"/>
                             <TextBlock Text="&#xEA18;" FontFamily="{StaticResource IconFont}" FontSize="30" Foreground="{Binding StatusBrush}"
@@ -25,7 +29,7 @@
                                        Foreground="{Binding StatusBrush}"/>
                             <TextBlock Text="{Binding StatusSubtitle}" Style="{StaticResource MutedText}" FontSize="13" Margin="0,2,0,0"/>
                         </StackPanel>
-                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <StackPanel x:Name="Kpis" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                             <Border CornerRadius="12" Padding="14,10" Margin="8,0,0,0" MinWidth="104" Background="#0DFFFFFF">
                                 <StackPanel>
                                     <TextBlock Text="{Binding Cockpit.AvgLatency}" FontSize="19" FontWeight="SemiBold" FontFamily="{StaticResource DisplayFont}"/>

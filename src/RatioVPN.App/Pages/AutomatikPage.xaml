@@ -29,12 +29,12 @@
                                        Text="Jedes Programm, das zu einer Regel passt, bekommt automatisch eine Verbindung – nie doppelt belegt. Fällt eine aus, wechselt es auf eine freie Reserve (unzuverlässige Server zuletzt). Ist keine frei oder das Internet weg, wird blockiert statt mit deiner echten IP zu verbinden."/>
                         </StackPanel>
                         <CheckBox Grid.Column="2" Style="{StaticResource Switch}" VerticalAlignment="Top" IsChecked="{Binding AutoPilotEnabled}"/>
-                        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="16,14,0,0">
+                        <WrapPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="16,14,0,0">
                             <TextBlock Text="Eine Verbindung gilt als ausgefallen nach" Style="{StaticResource MutedText}" FontSize="12.5" VerticalAlignment="Center"/>
                             <TextBox Style="{StaticResource DarkTextBox}" Width="56" Margin="8,0" Padding="6,4" HorizontalContentAlignment="Center"
                                      Text="{Binding FailAfterSeconds, UpdateSourceTrigger=LostFocus}"/>
                             <TextBlock Text="Sekunden ohne Antwort (10–300)" Style="{StaticResource MutedText}" FontSize="12.5" VerticalAlignment="Center"/>
-                        </StackPanel>
+                        </WrapPanel>
                     </Grid>
                 </Grid>
             </Border>

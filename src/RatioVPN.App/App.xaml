@@ -276,10 +276,6 @@
                 </Setter.Value>
             </Setter>
         </Style>
-        <!-- Alter Reiter-Stil (bis alle Seiten umgezogen sind) -->
-        <Style x:Key="TabButton" TargetType="RadioButton" BasedOn="{StaticResource NavItem}">
-            <Setter Property="GroupName" Value="tabs"/>
-        </Style>
 
         <!-- Segmentschalter (z. B. getrennt / gemeinsam) -->
         <Style x:Key="Segment" TargetType="RadioButton">

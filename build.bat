@@ -6,7 +6,7 @@ where dotnet >nul 2>nul || goto nosdk
 dotnet --list-sdks | findstr /r "^8\. ^9\. ^10\." >nul || goto nosdk
 
 echo Baue Ratio VPN ...
-dotnet publish src\RatioVPN.App\RatioVPN.App.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish
+dotnet publish src\RatioVPN.App\RatioVPN.App.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish-2.0
 if errorlevel 1 (
   echo.
   echo Build fehlgeschlagen. Bitte die Fehlermeldung oben kopieren.
@@ -15,8 +15,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo Fertig: publish\RatioVPN.exe  (WinDivert.dll und WinDivert64.sys muessen daneben liegen)
-explorer publish
+echo Fertig: publish-2.0\RatioVPN.exe  (WinDivert.dll und WinDivert64.sys muessen daneben liegen)
+explorer publish-2.0
 pause
 exit /b 0
 

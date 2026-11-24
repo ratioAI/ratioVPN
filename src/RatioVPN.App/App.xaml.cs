@@ -105,7 +105,24 @@ public partial class App : Application
                 if (AutostartTask.IsEnabled() && AutostartTask.EnsurePointsTo(self)) Log("Autostart zeigt jetzt auf " + self);
             });
 
-        var vm = new MainViewModel(_controller) { Banner = banner ?? "" };
+        // Statistik: beim ersten Start von 2.0 einmalig rückwirkend aus fehler.log füllen
+        var statsPath = Path.Combine(Path.GetDirectoryName(LogPath)!, "statistik.jsonl");
+        bool firstStats = !File.Exists(statsPath);
+        var stats = new RatioVPN.Core.Stats.StatsStore(statsPath);
+        if (firstStats)
+        {
+            try { Log($"Statistik: {RatioVPN.Core.Stats.LogBackfill.Import(LogPath, stats)} Ereignisse aus dem Protokoll übernommen"); }
+            catch (Exception ex) { Log("Statistik-Rückblick: " + ex.Message); }
+        }
+
+        var vm = new MainViewModel(_controller, ShellOptions.Default with { Stats = stats }) { Banner = banner ?? "" };
+
+        // Zuverlässigkeit der letzten 24 h übernehmen (Statistik kennt Namen, die Automatik IDs)
+        var idByName = _controller.Tunnels.GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Id, StringComparer.OrdinalIgnoreCase);
+        vm.AutoPilot.SeedFailures(stats.RecentFailures(TimeSpan.FromHours(24))
+            .Where(f => idByName.ContainsKey(f.TunnelName))
+            .Select(f => (idByName[f.TunnelName], f.Time)));
         _window = new MainWindow(vm);
         _window.Closing += (_, args) =>
         {

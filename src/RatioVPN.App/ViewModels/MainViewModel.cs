@@ -70,6 +70,7 @@ public sealed class MainViewModel : ObservableObject
     public string Search { get => _search; set { if (Set(ref _search, value)) RefreshPrograms(); } }
 
     private string _banner = "";
+    private string? _captureBanner;
     public string Banner { get => _banner; set { if (Set(ref _banner, value)) Raise(nameof(HasBanner)); } }
     public bool HasBanner => !string.IsNullOrEmpty(_banner);
 
@@ -567,6 +568,10 @@ public sealed class MainViewModel : ObservableObject
             : $"{connected} von {Tunnels.Count} Verbindungen aktiv · {assigned} Programm(e) über VPN";
         UpdateShellStatus(connected);
         Cockpit.Refresh(_lastSnapshot);
+
+        // Fehler beim späteren Einschalten der Paketumleitung sichtbar machen (nie still schlucken)
+        if (Controller.CaptureError is { } err && Banner != err) { _captureBanner = err; Banner = err; }
+        else if (Controller.CaptureError == null && _captureBanner != null && Banner == _captureBanner) { _captureBanner = null; Banner = ""; }
         if (CurrentPage == Page.Stats && _sinceStatsRefresh.Elapsed > TimeSpan.FromSeconds(60))
         {
             _sinceStatsRefresh.Restart();
