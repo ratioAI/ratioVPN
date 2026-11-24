@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using RatioVPN.Core;
 using RatioVPN.Core.Settings;
 
 namespace RatioVPN.App;
@@ -99,6 +101,39 @@ public static class WindowEnumerator
         }
         catch { }
         return Path.GetFileNameWithoutExtension(exePath);
+    }
+}
+
+/// <summary>Findet laufende Prozesse nach Programmdatei (für Automatik-Regeln ohne Fenster).</summary>
+public static class ProcessEnumerator
+{
+    public static List<ProcessInfo> Find(IReadOnlyCollection<string> exeNames)
+    {
+        var result = new List<ProcessInfo>();
+        if (exeNames.Count == 0) return result;
+        var wanted = new HashSet<string>(exeNames, StringComparer.OrdinalIgnoreCase);
+        int self = Environment.ProcessId;
+        foreach (var p in Process.GetProcesses())
+        {
+            using (p)
+            {
+                if (p.Id <= 4 || p.Id == self) continue;
+                if (!wanted.Contains(p.ProcessName + ".exe")) continue;
+                var path = WindowEnumerator.ExePath(p.Id);
+                if (path != null) result.Add(new ProcessInfo(p.Id, path));
+            }
+        }
+        return result;
+    }
+}
+
+/// <summary>Ein gemeinsamer Scan (Fenster + gesuchte Prozesse) für Automatik und Programmliste.</summary>
+public static class SystemScanner
+{
+    public static SystemSnapshot Take(IReadOnlyCollection<string> processExeNames)
+    {
+        var windows = WindowEnumerator.GetOpenWindows().Select(w => new WindowInfo(w.Pid, w.ExePath, w.Title)).ToList();
+        return new SystemSnapshot(windows, ProcessEnumerator.Find(processExeNames));
     }
 }
 

@@ -5,9 +5,6 @@ using RatioVPN.Core.WireGuard;
 
 namespace RatioVPN.Core;
 
-/// <summary>Ein offenes Fenster, wie es die Automatik sieht.</summary>
-public sealed record WindowInfo(int Pid, string ExePath, string Title);
-
 /// <summary>Meldung der Automatik. Important = wird auch nach Discord geschickt.</summary>
 public sealed record AutoPilotEvent(DateTime Time, string Message, bool Important);
 
