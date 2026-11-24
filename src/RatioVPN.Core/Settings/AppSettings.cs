@@ -33,6 +33,8 @@ public sealed class WindowRuleEntry
     public string Title { get; set; } = "";
     /// <summary>Tunnel-ID, "" für "ohne VPN" oder "!" für "blockiert".</summary>
     public string TunnelId { get; set; } = "";
+    /// <summary>Von der Automatik gesetzt (darf sie wieder aufheben), sonst vom Nutzer.</summary>
+    public bool Auto { get; set; }
 }
 
 /// <summary>Einstellungen der Automatik (unbeaufsichtigter Betrieb).</summary>

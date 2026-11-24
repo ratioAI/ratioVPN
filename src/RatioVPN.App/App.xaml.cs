@@ -211,8 +211,12 @@ public partial class App : Application
         e.Handled = true;
     }
 
+    /// <summary>Ersetzt das Protokoll (z. B. im Vorschau-Werkzeug: nie in die echte fehler.log schreiben).</summary>
+    public static Action<string>? LogOverride { get; set; }
+
     public static void Log(string text)
     {
+        if (LogOverride != null) { LogOverride(text); return; }
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);

@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -40,6 +41,9 @@ public sealed class StatsStore
     private readonly List<TrafficSample> _traffic = new();
 
     public string FilePath { get; }
+
+    /// <summary>Wie oft die Datei gekürzt wurde (Diagnose/Tests).</summary>
+    public int TrimCount { get; private set; }
 
     public StatsStore(string path, Func<DateTime>? clock = null)
     {
@@ -155,17 +159,38 @@ public sealed class StatsStore
         catch (UnauthorizedAccessException) { }
     }
 
-    /// <summary>Behält nur die letzten 90 Tage (Speicher und Datei).</summary>
+    /// <summary>
+    /// Kürzt auf höchstens 90 Tage UND die halbe Höchstgröße (neueste Einträge bleiben). Dadurch wird
+    /// danach lange nicht mehr gekürzt – auch wenn alle Daten aktuell sind.
+    /// </summary>
     private void Trim()
     {
+        TrimCount++;
         var cut = _clock() - KeepAfterTrim;
-        _events.RemoveAll(e => e.Time < cut);
-        _traffic.RemoveAll(s => s.Time < cut);
+        var all = _events.Where(e => e.Time >= cut)
+            .Select(e => (e.Time, Json: JsonSerializer.Serialize(new Line(e.Time, "event", e.Kind, e.TunnelName, e.Title, e.Message), Json), Event: e, Traffic: (TrafficSample?)null))
+            .Concat(_traffic.Where(s => s.Time >= cut)
+                .Select(s => (s.Time, Json: JsonSerializer.Serialize(new Line(s.Time, "traffic", Tunnel: s.TunnelName, Rx: s.Rx, Tx: s.Tx), Json), Event: (StatEvent?)null, Traffic: (TrafficSample?)s)))
+            .OrderByDescending(x => x.Time)
+            .ToList();
+        long budget = MaxFileBytes / 2, used = 0;
+        var keep = new List<(DateTime Time, string Json, StatEvent? Event, TrafficSample? Traffic)>();
+        foreach (var l in all)
+        {
+            long len = Encoding.UTF8.GetByteCount(l.Json) + 1;
+            if (used + len > budget) break;
+            used += len;
+            keep.Add(l);
+        }
+        keep.Reverse();
+        _events.Clear();
+        _events.AddRange(keep.Where(k => k.Event != null).Select(k => k.Event!));
+        _traffic.Clear();
+        _traffic.AddRange(keep.Where(k => k.Traffic != null).Select(k => k.Traffic!));
         var tmp = FilePath + ".tmp";
         using (var w = new StreamWriter(tmp, false))
         {
-            foreach (var e in _events) w.Write(JsonSerializer.Serialize(new Line(e.Time, "event", e.Kind, e.TunnelName, e.Title, e.Message), Json) + "\n");
-            foreach (var s in _traffic) w.Write(JsonSerializer.Serialize(new Line(s.Time, "traffic", Tunnel: s.TunnelName, Rx: s.Rx, Tx: s.Tx), Json) + "\n");
+            foreach (var k in keep) w.Write(k.Json + "\n");
         }
         File.Move(tmp, FilePath, overwrite: true);
     }

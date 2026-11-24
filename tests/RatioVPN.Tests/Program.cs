@@ -581,7 +581,8 @@ Console.WriteLine("Automatik (jedes Fenster eine eigene Verbindung, Wechsel bei 
     Check("Verbindung wieder da → Fenster wechselt zurück", c.WindowRuleFor(me) == lost.Id && c.WindowRuleFor(other) == r2);
 
     c.AssignWindow(me, mc1.ExePath, mc1.Title, null);
-    Fail(a); Fail(b); Fail(cc);
+    // Zwei von drei ausgefallen, die dritte ist vom anderen Fenster belegt → keine frei (aber kein „Internet weg“)
+    foreach (var t in new[] { a, b, cc }.Where(t => t.Id != c.WindowRuleFor(other))) Fail(t);
     ap.Step(new[] { mc1 });
     Check("Neues Fenster, keine Verbindung frei → blockiert", c.WindowRuleFor(me) == RoutingEngine.BlockRule);
 
@@ -893,6 +894,187 @@ Console.WriteLine("Statistik (Ereignisse, Rückblick aus dem Protokoll):");
         len < 5 * 1024 * 1024 && store.Events.All(e => e.Time >= now.AddDays(-90) || e.Kind == AutoPilotEventKind.Info)
         && store.Count(AutoPilotEventKind.Kicked, TimeSpan.FromDays(1)) == 1 && store.Events.Count(e => e.Kind == AutoPilotEventKind.Info) < 5600,
         $"{len}");
+    try { Directory.Delete(dir, true); } catch { }
+}
+
+// ================================================================ Nachbesserungen aus dem Review
+Console.WriteLine("Review-Nachbesserungen:");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(dir);
+
+    // ---- C1: Statistik-Datei wird bei vielen aktuellen Daten nach Größe gekürzt, nicht bei jedem Eintrag neu geschrieben
+    var nowS = new DateTime(2026, 11, 24, 18, 0, 0);
+    var store = new RatioVPN.Core.Stats.StatsStore(Path.Combine(dir, "stats.jsonl"), () => nowS);
+    var big = new string('y', 1000);
+    for (int i = 0; i < 6000; i++)
+        store.Add(new RatioVPN.Core.Stats.StatEvent(nowS.AddMinutes(-i % 600), AutoPilotEventKind.TunnelDown, "wg-DE-1", null, big));
+    long lenAfter = new FileInfo(store.FilePath).Length;
+    int trims = store.TrimCount;
+    store.Add(new RatioVPN.Core.Stats.StatEvent(nowS, AutoPilotEventKind.Kicked, "wg-DE-1", null, "neu"));
+    Check("Statistik: viele aktuelle Daten → nach Größe gekürzt, nicht bei jedem Eintrag",
+        lenAfter <= RatioVPN.Core.Stats.StatsStore.MaxFileBytes && trims is >= 1 and <= 4 && store.TrimCount == trims
+        && store.Count(AutoPilotEventKind.Kicked, TimeSpan.FromDays(1)) == 1,
+        $"len={lenAfter} trims={trims}/{store.TrimCount}");
+
+    // ---- M2: leeres altes Muster wird als ausgeschaltete Regel übernommen
+    var blank = new AppSettings();
+    blank.AutoPilot.TitlePattern = "   ";
+    AutoRuleMigration.Apply(blank);
+    Check("Leeres altes Muster → Regel ausgeschaltet (greift nicht alle Java-Prozesse)", blank.AutoRules![0].Enabled == false);
+
+    // ---- I1: Umleitung wird erneut versucht, sobald sie gebraucht wird
+    var cap = new FakeCapture();
+    var c1 = new VpnController(new SettingsStore(Path.Combine(dir, "s1.json")), new PlainProtector(), new FakeLookup(), cap);
+    c1.Start();
+    var t1 = c1.ImportConfig("A.conf", TestConf());
+    cap.FailNextStart = true;
+    c1.AssignProgram(@"C:\Tools\bot.exe", "Bot", t1.Id);
+    bool failedFirst = c1.CaptureError != null && !cap.IsRunning;
+    c1.RetryCapture();
+    Check("Fehlgeschlagene Umleitung wird beim nächsten Durchlauf erneut versucht", failedFirst && cap.IsRunning && c1.CaptureError == null);
+    c1.AssignProgram(@"C:\Tools\bot.exe", "Bot", null);
+    c1.RetryCapture();
+    Check("Ohne Regeln versucht der erneute Durchlauf nichts", !cap.IsRunning);
+
+    // ---- I3: IP-Prüfung nur mit laufender Umleitung
+    var c0 = new VpnController(new SettingsStore(Path.Combine(dir, "s0.json")), new PlainProtector(), new FakeLookup(), null);
+    c0.Start();
+    var t0 = c0.ImportConfig("A.conf", TestConf());
+    Exception? ipErr = null;
+    try { c0.CheckPublicIpAsync(t0.Id).GetAwaiter().GetResult(); } catch (Exception ex) { ipErr = ex; }
+    Check("Ohne Paketumleitung keine IP-Prüfung (würde die echte IP zeigen)",
+        !c0.CanCheckPublicIp && ipErr is InvalidOperationException && c1.CanCheckPublicIp);
+    var ap0 = new AutoPilot(c0);
+    int calls0 = 0;
+    var gated = new IpCheckScheduler(c0, ap0, (_, _) => { calls0++; return Task.FromResult("1.2.3.4"); }, canCheck: () => false);
+    t0.ForceStateForTest(TunnelState.Connected);
+    gated.Tick();
+    Check("Planer prüft nicht, solange die Umleitung nicht läuft", calls0 == 0);
+
+    // ---- I3: doppelte IP wird je IP nur einmal gemeldet, auch bei vielen Verbindungen
+    var cDup = new VpnController(new SettingsStore(Path.Combine(dir, "s2.json")), new PlainProtector(), new FakeLookup(), null);
+    cDup.Start();
+    var dupTunnels = Enumerable.Range(0, 5).Select(i => cDup.ImportConfig($"T{i}.conf", TestConf())).ToList();
+    var apDup = new AutoPilot(cDup);
+    var dupEvents = new List<AutoPilotEvent>();
+    apDup.EventRaised += dupEvents.Add;
+    foreach (var t in dupTunnels) apDup.ReportPublicIp(t.Id, "9.9.9.9");
+    Check("Fünf Verbindungen mit gleicher IP → eine Meldung statt einer Flut",
+        dupEvents.Count(e => e.Kind == AutoPilotEventKind.DuplicateIp) == 1, $"{dupEvents.Count}");
+
+    // ---- I3: manuelle Prüfung läuft über den Planer und doppelt nicht
+    var gateA = new TaskCompletionSource<string>();
+    int callsA = 0;
+    var ap1 = new AutoPilot(c1);
+    t1.ForceStateForTest(TunnelState.Connected);
+    var sched1 = new IpCheckScheduler(c1, ap1, (_, _) => { callsA++; return gateA.Task; });
+    sched1.Tick();
+    var manual = sched1.CheckOneAsync(t1.Id).GetAwaiter().GetResult();
+    gateA.SetResult("5.5.5.5");
+    Check("Manuelle Prüfung während laufender Prüfung startet keine zweite", callsA == 1 && manual != null);
+
+    // ---- I6: Regel auf unbekannte Verbindung + Kill-Switch → blockiert statt direkt
+    var lk = new FakeLookup();
+    var eng = new RoutingEngine(lk, new FakeInjector());
+    lk.Exe[6100] = @"C:\x\app.exe"; lk.Ports[(IpProto.Tcp, 51100)] = 6100;
+    eng.SetPidRules(new[] { new KeyValuePair<int, string>(6100, "ghost") });
+    eng.KillSwitch = true;
+    var vGhost = eng.HandleOutbound(BuildTcp(Ip("192.168.1.50"), Ip("1.2.3.4"), 51100, 443, 1, 0, TcpFlags.Syn, Array.Empty<byte>()), 1, 0);
+    eng.KillSwitch = false;
+    var vGhostOff = eng.HandleOutbound(BuildTcp(Ip("192.168.1.50"), Ip("1.2.3.4"), 51100, 443, 2, 0, TcpFlags.Syn, Array.Empty<byte>()), 1, 0);
+    Check("Regel auf unbekannte Verbindung: mit Kill-Switch blockiert, ohne direkt", vGhost == OutboundVerdict.Drop && vGhostOff == OutboundVerdict.Pass);
+    eng.Dispose();
+
+    // ---- Automatik-Szenarien mit echten Hilfsprozessen
+    var lkA = new FakeLookup();
+    var c = new VpnController(new SettingsStore(Path.Combine(dir, "s3.json")), new PlainProtector(), lkA, null);
+    c.Start();
+    var tA = new[] { "A", "B", "C", "D" }.Select(n => c.ImportConfig(n + ".conf", TestConf())).ToArray();
+    void Ready(WgTunnel t) => t.ForceStateForTest(TunnelState.Connected);
+    void Fail(WgTunnel t) => t.ForceStateForTest(TunnelState.Error);
+    foreach (var t in tA) { t.Start(); Ready(t); }
+    using var p1 = StartSleeper();
+    using var p2 = StartSleeper();
+    var clock = new DateTime(2026, 11, 24, 12, 0, 0);
+    var ap = new AutoPilot(c, () => clock);
+    var ev = new List<AutoPilotEvent>();
+    ap.EventRaised += ev.Add;
+    var w1 = new WindowInfo(p1.Id, @"C:\Java\javaw.exe", "Minecraft* 26.2");
+    var w2 = new WindowInfo(p2.Id, @"C:\Java\javaw.exe", "Minecraft* 26.2 | NRC 26.2");
+    ap.Step(new[] { w1, w2 });
+    string? cur1 = c.WindowRuleFor(p1.Id);
+
+    // I2: Reserven, von denen lange nichts kam, werden vor einem Wechsel geprüft (kein Wechsel ins Blaue)
+    foreach (var t in tA.Where(t => t.Id != cur1 && t.Id != c.WindowRuleFor(p2.Id))) t.SetLastReceivedForTest(TimeSpan.FromMinutes(2));
+    var dead = c.GetTunnel(cur1!)!;
+    Fail(dead);
+    ev.Clear();
+    ap.Step(new[] { w1, w2 });
+    var probed = tA.Where(t => t.ProbeCount > 0).ToList();
+    Check("Ausfall: unbekannte Reserven werden erst geprüft, kein sofortiger Wechsel",
+        c.WindowRuleFor(p1.Id) == cur1 && probed.Count >= 1 && ev.All(e => e.Kind is not (AutoPilotEventKind.Switched or AutoPilotEventKind.Waiting)),
+        string.Join(" | ", ev.Select(e => e.Kind)));
+    foreach (var t in probed) Ready(t); // Antwort auf die Prüfung kam
+    clock += TimeSpan.FromSeconds(2);
+    ap.Step(new[] { w1, w2 });
+    Check("Geprüfte Reserve antwortet → Wechsel", c.WindowRuleFor(p1.Id) is { } nowOn && nowOn != cur1 && probed.Any(t => t.Id == nowOn));
+
+    // I2: nach „Internet wieder da“ kurze Schonfrist ohne Wechsel
+    foreach (var t in tA) Fail(t);
+    for (int i = 0; i < 2; i++) { clock += TimeSpan.FromSeconds(2); ap.Step(new[] { w1, w2 }); }
+    string? held = c.WindowRuleFor(p1.Id);
+    foreach (var t in tA.Where(t => t.Id != held)) Ready(t);
+    ev.Clear();
+    clock += TimeSpan.FromSeconds(2);
+    ap.Step(new[] { w1, w2 });
+    bool upSeen = ev.Any(e => e.Kind == AutoPilotEventKind.InternetUp);
+    clock += TimeSpan.FromSeconds(5);
+    ap.Step(new[] { w1, w2 });
+    Check("Nach „Internet wieder da“: Schonfrist, noch kein Wechsel", upSeen && c.WindowRuleFor(p1.Id) == held);
+    clock += TimeSpan.FromSeconds(25);
+    ap.Step(new[] { w1, w2 });
+    Check("Nach der Schonfrist normaler Wechsel", c.WindowRuleFor(p1.Id) != held && c.WindowRuleFor(p1.Id) != RoutingEngine.BlockRule);
+
+    // I6 (Automatik): Fenster auf unbekannter Verbindung wird blockiert statt daran festgehalten
+    foreach (var t in tA) Fail(t);
+    tA[0].ForceStateForTest(TunnelState.Connected); // genug, damit kein „Internet weg“: 1 von 4 läuft …
+    c.AssignWindow(p2.Id, w2.ExePath, w2.Title, "ghost", auto: true);
+    var apG = new AutoPilot(c, () => clock);
+    c.Settings.Rules.Add(new RuleEntry { ExePath = @"C:\other\x.exe", TunnelId = tA[0].Id }); // A ist belegt → keine freie
+    apG.Step(new[] { w2 });
+    Check("Fenster auf unbekannter Verbindung wird blockiert statt festgehalten", c.WindowRuleFor(p2.Id) == RoutingEngine.BlockRule, c.WindowRuleFor(p2.Id));
+    c.Settings.Rules.Clear();
+
+    // I5: Blockade der Automatik wird aufgehoben, wenn die Regel nicht mehr passt
+    c.Settings.AutoRules![0].Enabled = false;
+    apG.Step(new[] { w2 });
+    Check("Regel ausgeschaltet → Blockade der Automatik wird aufgehoben", c.WindowRuleFor(p2.Id) == null, c.WindowRuleFor(p2.Id));
+    c.Settings.AutoRules![0].Enabled = true;
+    c.AssignWindow(p2.Id, w2.ExePath, w2.Title, RoutingEngine.BlockRule, auto: true);
+    c.Settings.AutoPilot.Enabled = false;
+    apG.Step(new[] { w2 });
+    Check("Automatik aus → ihre Blockaden werden aufgehoben", c.WindowRuleFor(p2.Id) == null);
+    c.AssignWindow(p2.Id, w2.ExePath, w2.Title, RoutingEngine.BlockRule); // vom Nutzer gesetzt
+    apG.Step(new[] { w2 });
+    Check("Vom Nutzer gesetzte Blockade bleibt", c.WindowRuleFor(p2.Id) == RoutingEngine.BlockRule);
+    c.Settings.AutoPilot.Enabled = true;
+
+    // M3: Prozess weg zwischen Scan und Zuordnung → keine veraltete Regel im Routing
+    using var p3 = StartSleeper();
+    lkA.Exe[p3.Id] = @"C:\Java\javaw.exe"; lkA.Ports[(IpProto.Tcp, 51300)] = p3.Id;
+    Ready(tA[1]);
+    c.AssignWindow(p3.Id, @"C:\Java\javaw.exe", "MC", tA[1].Id);
+    int deadPid = p3.Id;
+    p3.Kill(); p3.WaitForExit(3000);
+    c.AssignWindow(deadPid, @"C:\Java\javaw.exe", "MC", tA[1].Id);
+    var vStale = c.Engine.HandleOutbound(BuildTcp(Ip("192.168.1.50"), Ip("1.2.3.4"), 51300, 443, 1, 0, TcpFlags.Syn, Array.Empty<byte>()), 1, 0);
+    Check("Prozess beendet: alte Prozessregel verschwindet auch aus dem Routing", c.WindowRuleFor(deadPid) == null && vStale == OutboundVerdict.Pass, $"{vStale}");
+
+    foreach (var t in tA) t.Stop();
+    t1.Stop(); t0.Stop();
+    foreach (var t in dupTunnels) t.Stop();
+    try { p1.Kill(); p2.Kill(); } catch { }
     try { Directory.Delete(dir, true); } catch { }
 }
 

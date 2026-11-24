@@ -21,6 +21,9 @@ internal static class Program
     private static int Main(string[] args)
     {
         if (args.Length == 1 && args[0] == "--sleep") { Thread.Sleep(120_000); return 0; }
+        // Die Vorschau schreibt NIE in die echte %APPDATA%\RatioVPNehler.log.
+        App.App.LogOverride = _ => { };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Console.Error.WriteLine(e.ExceptionObject);
 
         var outDir = Path.GetFullPath(args.FirstOrDefault(a => !a.StartsWith("--")) ?? "preview");
         Directory.CreateDirectory(outDir);

@@ -67,6 +67,15 @@ public sealed class AutoPilot
     /// <summary>So lange ohne Verkehr gilt eine überwachte Kopie als vom Server getrennt.</summary>
     public static readonly TimeSpan KickAfter = TimeSpan.FromSeconds(60);
 
+    /// <summary>Beim Wechsel weg von einer ausgefallenen Verbindung gelten nur Reserven als sicher, von denen so kürzlich
+    /// etwas kam. Untätige Reserven hören bis zum nächsten Schlüsselwechsel nichts – sie werden erst geprüft.</summary>
+    public static readonly TimeSpan FreshFor = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan ProbeEvery = TimeSpan.FromSeconds(10);
+    /// <summary>Nach „Internet wieder da“ so lange nichts umstellen – die Verbindungen erholen sich gerade.</summary>
+    public static readonly TimeSpan GraceAfterOutage = TimeSpan.FromSeconds(20);
+    private DateTime _holdUntil = DateTime.MinValue;
+    private readonly Dictionary<string, DateTime> _lastProbe = new();
+
     /// <summary>Anteil ausgefallener Verbindungen, ab dem das eigene Internet als weg gilt.</summary>
     public const double InternetDownShare = 0.75;
 
@@ -186,6 +195,7 @@ public sealed class AutoPilot
         TrackTunnelHealth();
         if (!S.Enabled)
         {
+            ReleaseAutoBlocks(new HashSet<int>());
             _instances = new();
             return;
         }
@@ -199,6 +209,7 @@ public sealed class AutoPilot
 
         var instances = FindInstances(snapshot);
         var managedPids = instances.Select(i => i.Pid).ToHashSet();
+        ReleaseAutoBlocks(managedPids);
 
         // Belegt sind Verbindungen aus Programm-Regeln und aus Regeln nicht verwalteter Prozesse.
         var used = new HashSet<string>();
@@ -210,7 +221,7 @@ public sealed class AutoPilot
 
         var units = BuildUnits(instances);
 
-        if (InternetDown)
+        if (InternetDown || _clock() < _holdUntil)
         {
             HoldDuringOutage(units);
             foreach (var pid in _lastNotice.Keys.Where(p => !managedPids.Contains(p)).ToList()) _lastNotice.Remove(pid);
@@ -230,7 +241,7 @@ public sealed class AutoPilot
                 {
                     if (_c.WindowRuleFor(m.Pid) != u.Current)
                     {
-                        _c.AssignWindow(m.Pid, m.ExePath, m.Title, u.Current); // neue Kopie einer gemeinsamen Regel
+                        _c.AssignWindow(m.Pid, m.ExePath, m.Title, u.Current, auto: true); // neue Kopie einer gemeinsamen Regel
                         Raise($"{Label(m)}: neu erkannt → {TunnelName(u.Current)}", false, AutoPilotEventKind.Assigned, u.Current, m.Pid);
                     }
                     Remember(m.Pid, "ok:" + u.Current);
@@ -246,12 +257,25 @@ public sealed class AutoPilot
         foreach (var u in pending)
         {
             var cur = u.Current;
-            bool hadTunnel = cur != null && IsTunnelId(cur);
+            bool hadTunnel = IsKnownTunnel(cur); // Regel auf eine unbekannte Verbindung zählt wie keine
             bool duplicate = hadTunnel && used.Contains(cur!);
             bool failed = hadTunnel && !duplicate && IsFailed(cur!);
 
-            var free = _c.Tunnels
-                .Where(t => !used.Contains(t.Id) && IsReady(t.Id))
+            var candidates = _c.Tunnels.Where(t => !used.Contains(t.Id) && IsReady(t.Id)).ToList();
+            bool probing = false;
+            if (failed)
+            {
+                // Nicht ins Blaue wechseln: nur Reserven, von denen kürzlich etwas kam. Sonst erst prüfen und warten –
+                // bei einem Internet-Ausfall sind die untätigen Reserven genauso tot.
+                var fresh = candidates.Where(t => t.SinceLastReceive < FreshFor).ToList();
+                if (fresh.Count == 0 && candidates.Count > 0)
+                {
+                    foreach (var t in candidates) ProbeIfDue(t);
+                    probing = true;
+                }
+                candidates = fresh;
+            }
+            var free = candidates
                 .OrderBy(t => ReliabilityTier(t.Id))
                 .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
@@ -262,7 +286,7 @@ public sealed class AutoPilot
                 foreach (var m in u.Members)
                 {
                     var mine = _c.WindowRuleFor(m.Pid);
-                    _c.AssignWindow(m.Pid, m.ExePath, m.Title, free.Id);
+                    _c.AssignWindow(m.Pid, m.ExePath, m.Title, free.Id, auto: true);
                     var label = Label(m);
                     string message = !hadTunnel
                         ? (mine == Block ? $"{label}: freie Verbindung gefunden → {free.Name}" : $"{label}: neu erkannt → {free.Name}")
@@ -280,7 +304,12 @@ public sealed class AutoPilot
                 MarkUsed(used, cur!);
                 foreach (var m in u.Members)
                 {
-                    if (_c.WindowRuleFor(m.Pid) != cur) _c.AssignWindow(m.Pid, m.ExePath, m.Title, cur);
+                    if (_c.WindowRuleFor(m.Pid) != cur) _c.AssignWindow(m.Pid, m.ExePath, m.Title, cur, auto: true);
+                    if (probing)
+                    {
+                        Remember(m.Pid, "probe:" + cur); // Reserven werden gerade geprüft – noch nichts melden
+                        continue;
+                    }
                     if (Remember(m.Pid, "wait:" + cur))
                         Raise($"{Label(m)}: {TunnelName(cur!)} ausgefallen, keine freie Reserve – wartet (kein Internet, keine echte IP)",
                             true, AutoPilotEventKind.Waiting, cur, m.Pid);
@@ -293,7 +322,7 @@ public sealed class AutoPilot
                     !used.Contains(t.Id) && _c.IsEnabled(t.Id) && !IsReady(t.Id) && !IsFailed(t.Id));
                 foreach (var m in u.Members)
                 {
-                    if (_c.WindowRuleFor(m.Pid) != Block) _c.AssignWindow(m.Pid, m.ExePath, m.Title, Block);
+                    if (_c.WindowRuleFor(m.Pid) != Block) _c.AssignWindow(m.Pid, m.ExePath, m.Title, Block, auto: true);
                     if (!anyStarting && Remember(m.Pid, "blocked"))
                         Raise($"{Label(m)}: keine freie Verbindung – blockiert, bis eine frei wird", true, AutoPilotEventKind.Blocked, null, m.Pid);
                 }
@@ -373,7 +402,7 @@ public sealed class AutoPilot
                 var u = new Unit { Rule = first.Rule, RuleIndex = first.RuleIndex };
                 u.Members.AddRange(g.OrderBy(i => i.Pid));
                 // Gemeinsame Verbindung = die, die die meisten Kopien schon haben.
-                u.Current = u.Members.Select(m => _c.WindowRuleFor(m.Pid)).Where(IsTunnelId)
+                u.Current = u.Members.Select(m => _c.WindowRuleFor(m.Pid)).Where(IsKnownTunnel)
                     .GroupBy(id => id).OrderByDescending(x => x.Count()).Select(x => x.Key).FirstOrDefault();
                 units.Add(u);
             }
@@ -420,6 +449,7 @@ public sealed class AutoPilot
         else if (!down && InternetDown)
         {
             InternetDown = false;
+            _holdUntil = _clock() + GraceAfterOutage;
             Raise("Internet wieder da", true, AutoPilotEventKind.InternetUp);
         }
         if (InternetDown) foreach (var t in failed) _outageTunnels.Add(t.Id);
@@ -436,7 +466,7 @@ public sealed class AutoPilot
                 Remember(m.Pid, "outage:" + mine);
                 continue;
             }
-            if (mine != Block) _c.AssignWindow(m.Pid, m.ExePath, m.Title, Block);
+            if (mine != Block) _c.AssignWindow(m.Pid, m.ExePath, m.Title, Block, auto: true);
             Remember(m.Pid, "outage-blocked");
         }
     }
@@ -472,6 +502,27 @@ public sealed class AutoPilot
 
     private static bool IsTunnelId(string? v) => !string.IsNullOrEmpty(v) && v != Block;
 
+    /// <summary>Tunnel-ID einer Verbindung, die es gibt (nicht gelöscht/nicht ladbar).</summary>
+    private bool IsKnownTunnel(string? v) => IsTunnelId(v) && _c.GetTunnel(v!) != null;
+
+    private void ProbeIfDue(WgTunnel t)
+    {
+        var now = _clock();
+        if (_lastProbe.TryGetValue(t.Id, out var at) && now - at < ProbeEvery) return;
+        _lastProbe[t.Id] = now;
+        t.Probe();
+    }
+
+    /// <summary>
+    /// Blockaden, die die Automatik gesetzt hat, wieder aufheben, sobald der Prozess zu keiner Regel mehr passt
+    /// (Regel geändert/aus, Automatik aus). Zugewiesene Verbindungen bleiben (kein Leck); Nutzer-Regeln bleiben.
+    /// </summary>
+    private void ReleaseAutoBlocks(HashSet<int> managedPids)
+    {
+        foreach (var r in _c.Settings.WindowRules.Where(r => r.Auto && r.TunnelId == Block && !managedPids.Contains(r.Pid)).ToList())
+            _c.AssignWindow(r.Pid, r.ExePath, r.Title, null);
+    }
+
     /// <summary>Belegt eine Verbindung – und alle mit derselben öffentlichen IP (sonst wären Programme nur scheinbar getrennt).</summary>
     private void MarkUsed(HashSet<string> used, string tunnelId)
     {
@@ -492,13 +543,11 @@ public sealed class AutoPilot
         entry.LastPublicIp = ip;
         entry.LastPublicIpAt = _clock();
         _c.SaveSettings();
-        foreach (var other in _c.Settings.Tunnels.Where(t => t.Id != tunnelId && t.LastPublicIp == ip))
-        {
-            var key = string.Join("|", new[] { tunnelId, other.Id }.OrderBy(x => x, StringComparer.Ordinal)) + "|" + ip;
-            if (!_reportedDuplicates.Add(key)) continue;
-            Raise($"{entry.Name} und {other.Name} haben dieselbe öffentliche IP {ip} – werden nicht gleichzeitig für getrennte Programme genutzt",
-                true, AutoPilotEventKind.DuplicateIp, tunnelId);
-        }
+        var group = _c.Settings.Tunnels.Where(t => t.LastPublicIp == ip).Select(t => t.Name).ToList();
+        if (group.Count < 2 || !_reportedDuplicates.Add(ip)) return; // je IP nur eine Meldung
+        var names = group.Count == 2 ? $"{group[0]} und {group[1]}" : string.Join(", ", group.Take(group.Count - 1)) + " und " + group[^1];
+        Raise($"{names} haben dieselbe öffentliche IP {ip} – werden nicht gleichzeitig für getrennte Programme genutzt",
+            true, AutoPilotEventKind.DuplicateIp, tunnelId);
     }
 
     private string TunnelName(string id) => _c.GetTunnel(id)?.Name ?? "gelöschte Verbindung";

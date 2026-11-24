@@ -161,6 +161,25 @@ public sealed class WgTunnel : IDisposable
         }
     }
 
+    /// <summary>Zeit seit dem letzten Paket vom Server (Handshake-Antwort oder Daten). Untätige Reserven hören bis zum
+    /// nächsten Schlüsselwechsel (2 min) nichts – deshalb vor einem Wechsel <see cref="Probe"/>.</summary>
+    public TimeSpan SinceLastReceive => DateTime.UtcNow - _lastReceived;
+
+    internal int ProbeCount;
+
+    /// <summary>Prüft, ob der Server antwortet (startet einen Handshake, falls keiner läuft).</summary>
+    public void Probe()
+    {
+        Interlocked.Increment(ref ProbeCount);
+        BeginHandshake(force: false);
+    }
+
+    /// <summary>Nur für Tests: letztes Paket vom Server liegt so lange zurück.</summary>
+    internal void SetLastReceivedForTest(TimeSpan ago)
+    {
+        lock (_lock) _lastReceived = DateTime.UtcNow - ago;
+    }
+
     /// <summary>Nur für Tests/Vorschau: Handshake-Laufzeit setzen.</summary>
     internal void SetHandshakeRttForTest(TimeSpan rtt) => LastHandshakeRtt = rtt;
 
@@ -174,6 +193,7 @@ public sealed class WgTunnel : IDisposable
             _handshakeInProgress = handshakePending;
             _handshakeStarted = DateTime.UtcNow - (pendingFor ?? TimeSpan.Zero);
             if (state == TunnelState.Error) _errorSince = DateTime.UtcNow;
+            if (state == TunnelState.Connected) _lastReceived = DateTime.UtcNow;
             SetState(state, state == TunnelState.Error ? "Test-Fehler" : null);
         }
     }

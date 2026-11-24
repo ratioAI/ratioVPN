@@ -165,7 +165,12 @@ public sealed class RoutingEngine : IDisposable
         if (info.Version == 6) { Interlocked.Increment(ref _dropped); return OutboundVerdict.Drop; }
         if (info.IsFragment) { Interlocked.Increment(ref _dropped); return OutboundVerdict.Drop; }
 
-        if (!_tunnels.TryGetValue(tunnelId, out var tunnel)) return OutboundVerdict.Pass;
+        if (!_tunnels.TryGetValue(tunnelId, out var tunnel))
+        {
+            // Regel auf eine Verbindung, die es nicht (mehr) gibt, z. B. nicht ladbar: wie getrennt behandeln.
+            if (KillSwitch && !(info.Version == 4 && CidrSet.IsLocalV4(info.DstV4))) { Interlocked.Increment(ref _dropped); return OutboundVerdict.Drop; }
+            return OutboundVerdict.Pass;
+        }
 
         // LAN-Ziele (Drucker, Router, Chromecast …) und Ziele außerhalb von AllowedIPs bleiben direkt.
         if (CidrSet.IsLocalV4(info.DstV4) || !tunnel.Config.AllowedIps.ContainsV4(info.DstV4))

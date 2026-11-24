@@ -52,7 +52,9 @@ public static class AutoRuleMigration
                 TitlePattern = s.AutoPilot.TitlePattern,
                 Mode = AutoRuleMode.Separate,
                 WatchTraffic = true,
-                Enabled = true, // der Hauptschalter AutoPilot.Enabled entscheidet allein
+                // Der Hauptschalter AutoPilot.Enabled entscheidet allein. Ein leeres altes Muster passte auf nichts –
+                // als Regel ohne Titel würde es dagegen jeden Java-Prozess greifen, deshalb dann ausgeschaltet.
+                Enabled = !string.IsNullOrWhiteSpace(s.AutoPilot.TitlePattern),
             },
         };
         return true;

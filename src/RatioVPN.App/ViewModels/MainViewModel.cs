@@ -36,7 +36,7 @@ public sealed class MainViewModel : ObservableObject
 {
     private readonly ShellOptions _options;
 
-    private Page _currentPage = Page.Programs;
+    private Page _currentPage = Page.Cockpit;
     public Page CurrentPage
     {
         get => _currentPage;
@@ -127,7 +127,7 @@ public sealed class MainViewModel : ObservableObject
     private readonly Dictionary<string, (long Rx, long Tx)> _lastTraffic = new();
     private readonly System.Diagnostics.Stopwatch _sinceStatsRefresh = System.Diagnostics.Stopwatch.StartNew();
 
-    /// <summary>Datenmenge je Verbindung seit der letzten Probe in die Statistik schreiben (alle 5 min).</summary>
+    /// <summary>Datenmenge je Verbindung seit der letzten Probe in die Statistik schreiben (stündlich).</summary>
     private void SampleTraffic()
     {
         if (_options.Stats == null) return;
@@ -137,7 +137,8 @@ public sealed class MainViewModel : ObservableObject
             var last = _lastTraffic.GetValueOrDefault(t.Id);
             _lastTraffic[t.Id] = now;
             long rx = Math.Max(0, now.RxBytes - last.Rx), tx = Math.Max(0, now.TxBytes - last.Tx);
-            if (rx + tx > 0) _options.Stats.Add(new RatioVPN.Core.Stats.TrafficSample(DateTime.Now, t.Name, rx, tx));
+            if (rx + tx >= 64 * 1024) _options.Stats.Add(new RatioVPN.Core.Stats.TrafficSample(DateTime.Now, t.Name, rx, tx));
+            else _lastTraffic[t.Id] = last; // Kleinstmengen (Keepalives) sammeln statt einzeln speichern
         }
     }
     /// <summary>Prüft öffentliche IPs (null in der Vorschau).</summary>
@@ -214,6 +215,7 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             Controller.PruneWindowRules();
+            Controller.RetryCapture();
             _lastSnapshot = _options.Scan(AutoPilot.ProcessExeNames);
             AutoPilot.Step(_lastSnapshot);
             IpChecks?.Tick();
@@ -281,7 +283,8 @@ public sealed class MainViewModel : ObservableObject
         CheckIpCommand = new RelayCommand(async p => await CheckIp(p as TunnelItem), p => p is TunnelItem t && !t.CheckingIp);
         RemoveRuleCommand = new RelayCommand(p => { if (p is ProgramItem pi) pi.TunnelId = ""; });
         IpChecks = _options.EnableIpChecks
-            ? new IpCheckScheduler(controller, AutoPilot, (id, ct) => Controller.CheckPublicIpAsync(id, ct))
+            ? new IpCheckScheduler(controller, AutoPilot, (id, ct) => Controller.CheckPublicIpAsync(id, ct),
+                canCheck: () => Controller.CanCheckPublicIp)
             : null;
         CheckAllIpsCommand = new RelayCommand(async _ => await CheckAllIps(), _ => IpChecks != null && !CheckingAll);
 
@@ -295,7 +298,7 @@ public sealed class MainViewModel : ObservableObject
         _fastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _fastTimer.Tick += (_, _) => RefreshFast();
         _fastTimer.Start();
-        _trafficTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMinutes(5) };
+        _trafficTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromHours(1) };
         _trafficTimer.Tick += (_, _) => SampleTraffic();
         _trafficTimer.Start();
         _scanTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
@@ -397,8 +400,16 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             if (!Controller.IsEnabled(t.Id)) Controller.SetTunnelEnabled(t.Id, true);
-            var ip = await Controller.CheckPublicIpAsync(t.Id);
-            AutoPilot.ReportPublicIp(t.Id, ip); // speichern + Doppel-IP prüfen
+            if (IpChecks != null)
+            {
+                var error = await IpChecks.CheckOneAsync(t.Id);
+                if (error != null) t.IpError = error;
+            }
+            else
+            {
+                var ip = await Controller.CheckPublicIpAsync(t.Id);
+                AutoPilot.ReportPublicIp(t.Id, ip); // speichern + Doppel-IP prüfen
+            }
         }
         catch (Exception ex)
         {
@@ -585,6 +596,7 @@ public sealed class MainViewModel : ObservableObject
     private Brush _statusBrush = Palette.Gray, _statusSoftBrush = Palette.GraySoft;
     private bool _statusPulsing;
     private int _protectedCount, _connectedCount;
+    private string? _reportedCaptureError;
     public string StatusTitle { get => _statusTitle; private set => Set(ref _statusTitle, value); }
     public string StatusSubtitle { get => _statusSubtitle; private set => Set(ref _statusSubtitle, value); }
     public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }
@@ -626,8 +638,19 @@ public sealed class MainViewModel : ObservableObject
                                                        && Controller.Settings.Rules.All(r => r.TunnelId != t.Id));
         bool connecting = Controller.Tunnels.Any(t => Controller.IsEnabled(t.Id) && t.State == TunnelState.Connecting);
 
+        var captureError = Controller.CaptureError;
+        if (captureError != null && captureError != _reportedCaptureError)
+        {
+            _reportedCaptureError = captureError;
+            App.Log(captureError);
+            _discord.Post("⚠️ " + captureError);
+            NotifyRequested?.Invoke("Ratio VPN – nicht geschützt", captureError);
+        }
+        else if (captureError == null) _reportedCaptureError = null;
+
         (StatusTitle, StatusBrush, StatusSoftBrush) =
             Tunnels.Count == 0 ? ("Einrichten", Palette.Gray, Palette.GraySoft)
+            : captureError != null && (ProtectedCount > 0 || instances.Count > 0) ? ("Nicht geschützt", Palette.Red, Palette.RedSoft)
             : AutoPilot.InternetDown ? ("Internet weg", Palette.Red, Palette.RedSoft)
             : blocked + failing > 0 ? ("Achtung", Palette.Amber, Palette.AmberSoft)
             : ProtectedCount > 0 ? ("Geschützt", Palette.Green, Palette.GreenSoft)
@@ -638,6 +661,7 @@ public sealed class MainViewModel : ObservableObject
             "Geschützt" => TrayStatus.Ok,
             "Achtung" => TrayStatus.Warning,
             "Internet weg" => TrayStatus.Error,
+            "Nicht geschützt" => TrayStatus.Error,
             _ => TrayStatus.Idle,
         }, $"Ratio VPN – {StatusTitle}\n{ProtectedCount} geschützt · {connected}/{Tunnels.Count} Verbindungen");
         if (_lastTray != tray)

@@ -133,7 +133,9 @@ public sealed class RulesViewModel : ObservableObject
         set
         {
             if (string.IsNullOrEmpty(value)) return;
-            Add(new AutoRuleEntry { Name = Path.GetFileNameWithoutExtension(value), ExeNames = value, Mode = AutoRuleMode.Separate });
+            // Gemeinsam: viele Programme (Browser, Discord) laufen als mehrere Prozesse – getrennt würde jeder
+            // eine eigene Verbindung verbrauchen und der Rest würde blockiert.
+            Add(new AutoRuleEntry { Name = Path.GetFileNameWithoutExtension(value), ExeNames = value, Mode = AutoRuleMode.Shared });
             Raise();
         }
     }

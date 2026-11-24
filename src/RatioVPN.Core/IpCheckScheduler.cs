@@ -17,12 +17,16 @@ public sealed class IpCheckScheduler
     private readonly HashSet<string> _checked = new();
     private readonly Dictionary<string, DateTime> _failedAt = new();
     private readonly HashSet<string> _running = new();
+    private readonly Func<bool> _canCheck;
 
     /// <summary>Nach einer fehlgeschlagenen Prüfung frühestens so spät erneut automatisch versuchen.</summary>
     public static readonly TimeSpan RetryAfter = TimeSpan.FromMinutes(5);
 
-    public IpCheckScheduler(VpnController c, AutoPilot ap, Func<string, CancellationToken, Task<string>> check, int maxParallel = 2)
+    /// <param name="canCheck">Nur prüfen, wenn true (z. B. Paketumleitung läuft) – sonst käme die echte IP heraus.</param>
+    public IpCheckScheduler(VpnController c, AutoPilot ap, Func<string, CancellationToken, Task<string>> check, int maxParallel = 2,
+        Func<bool>? canCheck = null)
     {
+        _canCheck = canCheck ?? (() => true);
         _c = c;
         _ap = ap;
         _check = check;
@@ -37,6 +41,7 @@ public sealed class IpCheckScheduler
     /// <summary>Startet fällige automatische Prüfungen (regelmäßig aus der Oberfläche aufrufen).</summary>
     public void Tick()
     {
+        if (!_canCheck()) return;
         foreach (var t in _c.Tunnels)
         {
             if (!_c.IsEnabled(t.Id) || t.State != TunnelState.Connected) continue;
@@ -51,9 +56,22 @@ public sealed class IpCheckScheduler
         }
     }
 
+    /// <summary>Eine Verbindung jetzt prüfen (Knopf). null = Erfolg, sonst Fehlertext. Läuft schon eine Prüfung, keine zweite.</summary>
+    public async Task<string?> CheckOneAsync(string id)
+    {
+        if (!_canCheck()) return "Paketumleitung läuft nicht – die Prüfung würde deine echte IP zeigen.";
+        lock (_lock)
+        {
+            if (_running.Contains(id)) return "Prüfung läuft bereits …";
+            _running.Add(id);
+        }
+        return await RunAsync(id);
+    }
+
     /// <summary>Prüft alle aktivierten, verbundenen Verbindungen (unabhängig davon, ob schon geprüft).</summary>
     public async Task CheckAllAsync()
     {
+        if (!_canCheck()) return;
         var ids = _c.Tunnels.Where(t => _c.IsEnabled(t.Id) && t.State == TunnelState.Connected).Select(t => t.Id).ToList();
         using var gate = new SemaphoreSlim(_maxParallel);
         var tasks = ids.Select(async id =>
@@ -73,7 +91,7 @@ public sealed class IpCheckScheduler
         await Task.WhenAll(tasks);
     }
 
-    private async Task RunAsync(string id)
+    private async Task<string?> RunAsync(string id)
     {
         try
         {
@@ -85,10 +103,12 @@ public sealed class IpCheckScheduler
                 _failedAt.Remove(id);
             }
             _ap.ReportPublicIp(id, ip);
+            return null;
         }
-        catch
+        catch (Exception ex)
         {
             lock (_lock) _failedAt[id] = DateTime.UtcNow;
+            return ex.Message;
         }
         finally
         {
