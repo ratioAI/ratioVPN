@@ -1,11 +1,7 @@
 using System;
-using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Interop;
+using System.Windows.Media;
 
 namespace RatioVPN.App;
 
@@ -13,61 +9,50 @@ public partial class MainWindow : Window
 {
     public MainViewModel ViewModel { get; }
 
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-
-    public MainWindow(MainViewModel vm)
+    /// <param name="useBackdrop">Mica-Hintergrund versuchen (das Vorschau-Werkzeug schaltet ihn ab).</param>
+    public MainWindow(MainViewModel vm, bool useBackdrop = true)
     {
         InitializeComponent();
         ViewModel = vm;
         DataContext = vm;
+        if (vm.HasNoTunnels) vm.CurrentPage = Page.Tunnels;
+
+        bool mica = useBackdrop && Backdrop.MicaSupported;
+        if (mica)
+        {
+            // Rahmen bis in den Inhalt ausdehnen, damit Mica durchscheint; die halbtransparente Schicht hält alles lesbar.
+            Chrome.GlassFrameThickness = new Thickness(-1);
+            Background = Brushes.Transparent;
+            Root.Background = (Brush)FindResource("BgOverlay");
+        }
         SourceInitialized += (_, _) =>
         {
-            // Dunkle Titelleiste (Windows 10 20H1+ / Windows 11)
-            var hwnd = new WindowInteropHelper(this).Handle;
-            int on = 1;
-            if (DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int)) != 0)
-                DwmSetWindowAttribute(hwnd, 19, ref on, sizeof(int));
+            Backdrop.UseDarkTitleBar(this);
+            if (mica && !Backdrop.TryApplyMica(this))
+            {
+                Chrome.GlassFrameThickness = new Thickness(0);
+                Background = (Brush)FindResource("Bg");
+                Root.Background = (Brush)FindResource("Bg");
+            }
         };
-        if (vm.HasNoTunnels) vm.CurrentPage = Page.Tunnels;
-        SyncTabs();
-        vm.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(MainViewModel.CurrentPage)) SyncTabs(); };
-        TabPrograms.Checked += (_, _) => vm.CurrentPage = Page.Programs;
-        TabTunnels.Checked += (_, _) => vm.CurrentPage = Page.Tunnels;
-        TabSettings.Checked += (_, _) => vm.CurrentPage = Page.Settings;
+        StateChanged += (_, _) => UpdateMaximized();
     }
 
-    /// <summary>Übergang bis zur neuen Navigation: Seiten auf die drei bisherigen Reiter abbilden.</summary>
-    private void SyncTabs()
+    /// <summary>Maximiert ragt das Fenster über den Bildschirmrand hinaus – Rand ausgleichen, Symbol umschalten.</summary>
+    private void UpdateMaximized()
     {
-        switch (ViewModel.CurrentPage)
-        {
-            case Page.Tunnels: TabTunnels.IsChecked = true; break;
-            case Page.Settings: case Page.Automatik: TabSettings.IsChecked = true; break;
-            default: TabPrograms.IsChecked = true; break;
-        }
+        bool max = WindowState == WindowState.Maximized;
+        Root.Margin = max ? new Thickness(7) : new Thickness(0);
+        MaxButton.Content = max ? "" : "";
+        MaxButton.ToolTip = max ? "Wiederherstellen" : "Maximieren";
     }
 
-    private void OnImport(object sender, RoutedEventArgs e)
-    {
-        var dlg = new Microsoft.Win32.OpenFileDialog
-        {
-            Title = "WireGuard-Konfigurationen auswählen",
-            Filter = "WireGuard-Konfiguration (*.conf)|*.conf|Alle Dateien (*.*)|*.*",
-            Multiselect = true,
-        };
-        if (dlg.ShowDialog(this) == true) ViewModel.ImportFiles(dlg.FileNames);
-    }
+    private void OnMinimize(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
-    private void OnAddProgram(object sender, RoutedEventArgs e)
-    {
-        var dlg = new Microsoft.Win32.OpenFileDialog
-        {
-            Title = "Programm auswählen",
-            Filter = "Programme (*.exe)|*.exe",
-        };
-        if (dlg.ShowDialog(this) == true) ViewModel.AddProgramManually(dlg.FileName);
-    }
+    private void OnMaximize(object sender, RoutedEventArgs e) =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    private void OnClose(object sender, RoutedEventArgs e) => Close();
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
@@ -87,15 +72,5 @@ public partial class MainWindow : Window
         }
         foreach (var exe in exes) ViewModel.AddProgramManually(exe);
         if (exes.Count > 0) ViewModel.CurrentPage = Page.Programs;
-    }
-
-    private void OnNameKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter && sender is TextBox tb)
-        {
-            tb.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
-            Keyboard.ClearFocus();
-            FocusManager.SetFocusedElement(this, this);
-        }
     }
 }

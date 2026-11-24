@@ -29,11 +29,15 @@ public sealed class EnumToBoolConverter : IValueConverter
         value is true && p != null ? Enum.Parse(t, p.ToString()!) : Binding.DoNothing;
 }
 
-/// <summary>Leerer Text oder null → Collapsed.</summary>
+/// <summary>Leerer Text oder null → Collapsed (Parameter "inverse": nur bei leerem Text sichtbar, z. B. Platzhalter).</summary>
 public sealed class EmptyToCollapsedConverter : IValueConverter
 {
-    public object Convert(object value, Type t, object p, CultureInfo c) =>
-        value == null || value is string s && s.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+    public object Convert(object value, Type t, object p, CultureInfo c)
+    {
+        bool empty = value == null || value is string s && s.Length == 0;
+        if (p?.ToString() == "inverse") empty = !empty;
+        return empty ? Visibility.Collapsed : Visibility.Visible;
+    }
     public object ConvertBack(object value, Type t, object p, CultureInfo c) => Binding.DoNothing;
 }
 

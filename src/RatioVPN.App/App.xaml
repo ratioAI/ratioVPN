@@ -53,10 +53,7 @@
         <local:CountToVisibilityConverter x:Key="CountToVis"/>
 
         <!-- ============================ Text ============================ -->
-        <Style TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource Text}"/>
-            <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
-        </Style>
+        <!-- Kein globaler TextBlock-Stil: Schrift und Farbe erben vom Fenster, sonst überschreibt er Icon-Schriften in Knöpfen. -->
         <Style x:Key="MutedText" TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource Muted}"/>
             <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>

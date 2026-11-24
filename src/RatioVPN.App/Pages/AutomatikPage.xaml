@@ -1,0 +1,35 @@
+<UserControl x:Class="RatioVPN.App.Pages.AutomatikPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Übergang: alte Automatik-Karte; der Regel-Editor folgt (Task 18). -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
+        <StackPanel Margin="0,0,0,16" MaxWidth="900" HorizontalAlignment="Left">
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,16,0">
+                            <TextBlock Text="Automatik für unbeaufsichtigten Betrieb" Style="{StaticResource H2}"/>
+                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,3,0,0"
+                                       Text="Jedes Programm, das zu einer Regel passt, bekommt automatisch eine eigene Verbindung – nie doppelt."/>
+                        </StackPanel>
+                        <CheckBox Grid.Column="1" Style="{StaticResource Switch}" VerticalAlignment="Top" IsChecked="{Binding AutoPilotEnabled}"/>
+                    </Grid>
+                    <TextBlock Text="Discord-Benachrichtigung (Webhook-URL)" FontSize="13" Margin="0,14,0,4"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Style="{StaticResource DarkTextBox}" Text="{Binding DiscordWebhook, UpdateSourceTrigger=LostFocus}"/>
+                        <Button Grid.Column="1" Content="Test senden" Style="{StaticResource BaseButton}" Margin="8,0,0,0" Command="{Binding TestDiscordCommand}"/>
+                    </Grid>
+                    <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" Text="{Binding DiscordStatus}"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

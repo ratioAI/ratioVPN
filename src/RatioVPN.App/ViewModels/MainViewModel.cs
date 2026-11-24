@@ -16,296 +16,6 @@ using RatioVPN.Core.WireGuard;
 
 namespace RatioVPN.App;
 
-public abstract class ObservableObject : INotifyPropertyChanged
-{
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    protected bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
-    {
-        if (EqualityComparer<T>.Default.Equals(field, value)) return false;
-        field = value;
-        Raise(name);
-        return true;
-    }
-
-    public void Raise([CallerMemberName] string? name = null) =>
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-}
-
-public sealed class RelayCommand : ICommand
-{
-    private readonly Action<object?> _run;
-    private readonly Func<object?, bool>? _can;
-    public RelayCommand(Action<object?> run, Func<object?, bool>? can = null) { _run = run; _can = can; }
-    public event EventHandler? CanExecuteChanged { add => CommandManager.RequerySuggested += value; remove => CommandManager.RequerySuggested -= value; }
-    public bool CanExecute(object? p) => _can?.Invoke(p) ?? true;
-    public void Execute(object? p) => _run(p);
-}
-
-public static class Palette
-{
-    public static readonly Brush Green = Freeze(new SolidColorBrush(Color.FromRgb(0x34, 0xD3, 0x99)));
-    public static readonly Brush Amber = Freeze(new SolidColorBrush(Color.FromRgb(0xF5, 0xB0, 0x41)));
-    public static readonly Brush Red = Freeze(new SolidColorBrush(Color.FromRgb(0xF0, 0x5D, 0x5E)));
-    public static readonly Brush Gray = Freeze(new SolidColorBrush(Color.FromRgb(0x6B, 0x72, 0x80)));
-    public static readonly Brush Accent = Freeze(new SolidColorBrush(Color.FromRgb(0x7C, 0x6C, 0xFF)));
-    private static Brush Freeze(Brush b) { b.Freeze(); return b; }
-}
-
-/// <summary>Eintrag im Auswahlfeld: eine Verbindung oder "Ohne VPN".</summary>
-public sealed class TunnelOption : ObservableObject
-{
-    public string? Id { get; }
-    private string _name;
-    public string Name { get => _name; set => Set(ref _name, value); }
-    public TunnelOption(string? id, string name) { Id = id; _name = name; }
-    public override string ToString() => Name;
-}
-
-/// <summary>Ein Programm in der Liste "Programme".</summary>
-public sealed class ProgramItem : ObservableObject
-{
-    private readonly MainViewModel _owner;
-    public string ExePath { get; }
-    public string Name { get; }
-    public string ExeName => Path.GetFileName(ExePath);
-    public ImageSource? Icon { get; }
-    /// <summary>Gemeinsame Auswahlliste – direkt am Element, damit WPF sie vor SelectedValue kennt.</summary>
-    public ObservableCollection<TunnelOption> Options => _owner.Options;
-
-    private string _windowTitle = "";
-    public string WindowTitle { get => _windowTitle; set => Set(ref _windowTitle, value); }
-
-    private bool _isOpen;
-    public bool IsOpen { get => _isOpen; set { if (Set(ref _isOpen, value)) Raise(nameof(Subtitle)); } }
-
-    /// <summary>Mehrere Fenster, aber alle im selben Prozess (dann technisch nicht trennbar).</summary>
-    public int SharedWindowCount { get; set; }
-
-    public string Subtitle => !HasWindows && SharedWindowCount > 1
-        ? $"{SharedWindowCount} Fenster in einem einzigen Prozess – nur gemeinsam umleitbar · {WindowTitle}"
-        : HasWindows
-        ? $"{Windows.Count} Fenster · Auswahl rechts gilt für alle, darunter einzeln änderbar"
-        : IsOpen ? WindowTitle : HasTunnel ? "Nicht geöffnet · Regel gespeichert" : "Nicht geöffnet";
-
-    /// <summary>Vom Nutzer über "Programm hinzufügen" gewählt (bleibt auch ohne Fenster in der Liste).</summary>
-    public bool Manual { get; set; }
-
-    private string? _tunnelId;
-    /// <summary>Gewählte Verbindung (null = ohne VPN). Änderung durch den Nutzer wird sofort angewendet.</summary>
-    public string? TunnelId
-    {
-        get => _tunnelId;
-        set
-        {
-            if (_tunnelId == value) return;
-            if (_owner.SuppressAssign)
-            {
-                // Bei Neuaufbau der Auswahlliste setzt WPF kurz null – das ist keine Nutzeränderung.
-                Raise();
-                return;
-            }
-            _tunnelId = value;
-            Raise();
-            Raise(nameof(HasTunnel));
-            _owner.Assign(this);
-            RefreshStatus();
-        }
-    }
-
-    public void SetTunnelSilently(string? id)
-    {
-        _tunnelId = id;
-        Raise(nameof(TunnelId));
-        Raise(nameof(HasTunnel));
-        Raise(nameof(Subtitle));
-        RefreshStatus();
-    }
-
-    public bool HasTunnel => _tunnelId != null;
-
-    private Brush _statusBrush = Palette.Gray;
-    public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }
-
-    private string _statusText = "Direkt";
-    public string StatusText { get => _statusText; private set => Set(ref _statusText, value); }
-
-    public void RefreshStatus()
-    {
-        (StatusBrush, StatusText) = _owner.StatusFor(_tunnelId);
-        foreach (var w in Windows) w.RefreshStatus();
-    }
-
-    /// <summary>Einzelne Fenster/Prozesse dieses Programms (nur wenn es mehrere gibt).</summary>
-    public ObservableCollection<WindowItem> Windows { get; } = new();
-
-    private bool _hasWindows;
-    public bool HasWindows { get => _hasWindows; set { if (Set(ref _hasWindows, value)) Raise(nameof(Subtitle)); } }
-
-    public ProgramItem(MainViewModel owner, string exePath, string name)
-    {
-        _owner = owner;
-        ExePath = exePath;
-        Name = name;
-        Icon = IconCache.Get(exePath);
-    }
-}
-
-/// <summary>
-/// Ein einzelnes Fenster (genauer: ein eigener Prozess) eines Programms, z. B. eine von zwei
-/// Java/Minecraft-Instanzen. Kann eine eigene Verbindung bekommen, solange der Prozess läuft.
-/// </summary>
-public sealed class WindowItem : ObservableObject
-{
-    public const string Inherit = "*";
-
-    private readonly MainViewModel _owner;
-    private readonly ProgramItem _parent;
-    public int Pid { get; }
-    public ObservableCollection<TunnelOption> Options => _owner.WindowOptions;
-
-    private string _title = "";
-    public string Title { get => _title; set => Set(ref _title, value); }
-
-    private string _value = Inherit;
-    /// <summary>"*" = wie das Programm, "" = ohne VPN, sonst Tunnel-ID.</summary>
-    public string Value
-    {
-        get => _value;
-        set
-        {
-            value ??= Inherit;
-            if (_value == value) return;
-            if (_owner.SuppressAssign) { Raise(); return; }
-            _value = value;
-            Raise();
-            _owner.AssignWindow(this);
-            RefreshStatus();
-        }
-    }
-
-    public void SetValueSilently(string? controllerValue)
-    {
-        _value = controllerValue ?? Inherit;
-        Raise(nameof(Value));
-        RefreshStatus();
-    }
-
-    public string ExePath => _parent.ExePath;
-
-    private Brush _statusBrush = Palette.Gray;
-    public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }
-    private string _statusText = "";
-    public string StatusText { get => _statusText; private set => Set(ref _statusText, value); }
-
-    public void RefreshStatus()
-    {
-        string? effective = _value == Inherit ? _parent.TunnelId : _value.Length == 0 ? null : _value;
-        (StatusBrush, StatusText) = _owner.StatusFor(effective);
-    }
-
-    public WindowItem(MainViewModel owner, ProgramItem parent, int pid)
-    {
-        _owner = owner;
-        _parent = parent;
-        Pid = pid;
-    }
-}
-
-/// <summary>Eine Verbindung in der Liste "Verbindungen".</summary>
-public sealed class TunnelItem : ObservableObject
-{
-    private readonly MainViewModel _owner;
-    public WgTunnel Tunnel { get; }
-    public string Id => Tunnel.Id;
-    public string Endpoint => Tunnel.Config.Endpoint;
-    public string Address => Tunnel.Config.AddressV4?.ToString() ?? "";
-
-    private string _name;
-    public string Name
-    {
-        get => _name;
-        set
-        {
-            if (string.IsNullOrWhiteSpace(value) || value == _name) return;
-            _name = value.Trim();
-            Raise();
-            _owner.Controller.RenameTunnel(Id, _name);
-            _owner.RefreshOptions();
-        }
-    }
-
-    private Brush _statusBrush = Palette.Gray;
-    public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }
-    private string _statusText = "";
-    public string StatusText { get => _statusText; private set => Set(ref _statusText, value); }
-    private string _details = "";
-    public string Details { get => _details; private set => Set(ref _details, value); }
-    private string _traffic = "";
-    public string Traffic { get => _traffic; private set => Set(ref _traffic, value); }
-    private string _programs = "";
-    public string Programs { get => _programs; private set => Set(ref _programs, value); }
-    private bool _enabled;
-    public bool Enabled { get => _enabled; private set { if (Set(ref _enabled, value)) Raise(nameof(ToggleText)); } }
-    public string ToggleText => Enabled ? "Trennen" : "Verbinden";
-    private string _publicIp = "";
-    public string PublicIp { get => _publicIp; set => Set(ref _publicIp, value); }
-    private bool _checkingIp;
-    public bool CheckingIp { get => _checkingIp; set => Set(ref _checkingIp, value); }
-
-    public TunnelItem(MainViewModel owner, WgTunnel t)
-    {
-        _owner = owner;
-        Tunnel = t;
-        _name = t.Name;
-        Refresh();
-    }
-
-    public void Refresh()
-    {
-        var c = _owner.Controller;
-        Enabled = c.IsEnabled(Id);
-        var t = Tunnel;
-        if (!Enabled)
-        {
-            StatusBrush = Palette.Gray;
-            StatusText = "Getrennt";
-        }
-        else
-        {
-            (StatusBrush, StatusText) = t.State switch
-            {
-                TunnelState.Connected => (Palette.Green, "Verbunden"),
-                TunnelState.Connecting => (Palette.Amber, "Verbinde…"),
-                TunnelState.Error => (Palette.Red, "Fehler"),
-                _ => (Palette.Gray, "Bereit"),
-            };
-        }
-
-        if (t.State == TunnelState.Error && t.LastError != null) Details = t.LastError;
-        else if (t.LastHandshake is DateTime hs)
-        {
-            var ago = DateTime.UtcNow - hs;
-            Details = ago.TotalSeconds < 60 ? $"Letzter Handshake vor {Math.Max(0, (int)ago.TotalSeconds)} s" : $"Letzter Handshake vor {(int)ago.TotalMinutes} min";
-        }
-        else Details = Enabled ? "Noch kein Handshake" : "";
-
-        Traffic = $"↓ {FormatBytes(t.RxBytes)}   ↑ {FormatBytes(t.TxBytes)}";
-        var names = c.Settings.Rules.Where(r => r.TunnelId == Id).Select(r => r.DisplayName).ToList();
-        names.AddRange(c.Settings.WindowRules.Where(r => r.TunnelId == Id)
-            .Select(r => $"{(r.Title.Length > 30 ? r.Title[..30] + "…" : r.Title)} (Fenster)"));
-        Programs = names.Count == 0 ? "Keine Programme zugewiesen" : string.Join(", ", names);
-    }
-
-    private static string FormatBytes(long b) => b switch
-    {
-        < 1024 => $"{b} B",
-        < 1024 * 1024 => $"{b / 1024.0:0.0} KB",
-        < 1024L * 1024 * 1024 => $"{b / 1024.0 / 1024:0.0} MB",
-        _ => $"{b / 1024.0 / 1024 / 1024:0.00} GB",
-    };
-}
-
 /// <summary>Seiten der Oberfläche.</summary>
 public enum Page { Cockpit, Programs, Automatik, Tunnels, Stats, Settings }
 
@@ -327,7 +37,16 @@ public sealed class MainViewModel : ObservableObject
     private readonly ShellOptions _options;
 
     private Page _currentPage = Page.Programs;
-    public Page CurrentPage { get => _currentPage; set => Set(ref _currentPage, value); }
+    public Page CurrentPage
+    {
+        get => _currentPage;
+        set
+        {
+            if (!Set(ref _currentPage, value)) return;
+            Raise(nameof(PageTitle));
+            Raise(nameof(PageSubtitle));
+        }
+    }
     public VpnController Controller { get; }
     public ObservableCollection<ProgramItem> Programs { get; } = new();
     public ObservableCollection<TunnelItem> Tunnels { get; } = new();
@@ -337,7 +56,9 @@ public sealed class MainViewModel : ObservableObject
     private readonly HashSet<string> _manual = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly DispatcherTimer _fastTimer;
-    private readonly DispatcherTimer _windowTimer;
+    /// <summary>Ein gemeinsamer Scan (Fenster + gesuchte Prozesse) alle 2 s für Automatik und Programmliste.</summary>
+    private readonly DispatcherTimer _scanTimer;
+    private SystemSnapshot? _lastSnapshot;
 
     public ICommand ToggleTunnelCommand { get; }
     public ICommand RemoveTunnelCommand { get; }
@@ -366,7 +87,6 @@ public sealed class MainViewModel : ObservableObject
 
     public AutoPilot AutoPilot { get; }
     private readonly DiscordNotifier _discord;
-    private readonly DispatcherTimer _autoTimer;
 
     public ObservableCollection<string> History { get; } = new();
     public bool HasHistory => History.Count > 0;
@@ -424,16 +144,20 @@ public sealed class MainViewModel : ObservableObject
                         ?? "Testnachricht gesendet – schau in Discord nach.";
     }
 
+    /// <summary>Ein Durchlauf: aufräumen, scannen, Automatik, Programmliste.</summary>
     internal void RunAutoPilot()
     {
         try
         {
-            AutoPilot.Step(_options.Scan(AutoPilot.ProcessExeNames));
+            Controller.PruneWindowRules();
+            _lastSnapshot = _options.Scan(AutoPilot.ProcessExeNames);
+            AutoPilot.Step(_lastSnapshot);
         }
         catch (Exception ex)
         {
             App.Log("Automatik: " + ex);
         }
+        RefreshPrograms();
     }
 
     private void OnAutoPilotEvent(AutoPilotEvent e)
@@ -490,12 +214,9 @@ public sealed class MainViewModel : ObservableObject
         _fastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _fastTimer.Tick += (_, _) => RefreshFast();
         _fastTimer.Start();
-        _windowTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-        _windowTimer.Tick += (_, _) => { Controller.PruneWindowRules(); RefreshPrograms(); };
-        _windowTimer.Start();
-        _autoTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
-        _autoTimer.Tick += (_, _) => RunAutoPilot();
-        _autoTimer.Start();
+        _scanTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
+        _scanTimer.Tick += (_, _) => RunAutoPilot();
+        _scanTimer.Start();
     }
 
     // ---------------- Verbindungen ----------------
@@ -650,7 +371,7 @@ public sealed class MainViewModel : ObservableObject
     public void RefreshPrograms()
     {
         List<OpenWindow> windows;
-        try { windows = _options.Scan(Array.Empty<string>()).Windows.Select(w => new OpenWindow(w.Pid, w.ExePath, w.Title)).ToList(); }
+        try { windows = (_lastSnapshot ?? _options.Scan(Array.Empty<string>())).Windows.Select(w => new OpenWindow(w.Pid, w.ExePath, w.Title)).ToList(); }
         catch { return; }
 
         // Pro Programm (exe) ein Eintrag; Fenstertitel des ersten Fensters anzeigen
@@ -759,13 +480,73 @@ public sealed class MainViewModel : ObservableObject
         Summary = Tunnels.Count == 0
             ? "Noch keine Verbindung – importiere eine WireGuard-Datei"
             : $"{connected} von {Tunnels.Count} Verbindungen aktiv · {assigned} Programm(e) über VPN";
+        UpdateShellStatus(connected);
+    }
+
+    // ---------------- Kopf / Seitenleiste ----------------
+
+    private string _statusTitle = "", _statusSubtitle = "";
+    private Brush _statusBrush = Palette.Gray, _statusSoftBrush = Palette.GraySoft;
+    private bool _statusPulsing;
+    private int _protectedCount, _connectedCount;
+    public string StatusTitle { get => _statusTitle; private set => Set(ref _statusTitle, value); }
+    public string StatusSubtitle { get => _statusSubtitle; private set => Set(ref _statusSubtitle, value); }
+    public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }
+    public Brush StatusSoftBrush { get => _statusSoftBrush; private set => Set(ref _statusSoftBrush, value); }
+    public bool StatusPulsing { get => _statusPulsing; private set => Set(ref _statusPulsing, value); }
+    /// <summary>Programme/Fenster, die gerade über eine Verbindung laufen.</summary>
+    public int ProtectedCount { get => _protectedCount; private set => Set(ref _protectedCount, value); }
+    public int ConnectedCount { get => _connectedCount; private set => Set(ref _connectedCount, value); }
+
+    public string PageTitle => CurrentPage switch
+    {
+        Page.Cockpit => "Cockpit",
+        Page.Programs => "Programme",
+        Page.Automatik => "Automatik",
+        Page.Tunnels => "Verbindungen",
+        Page.Stats => "Statistik",
+        _ => "Einstellungen",
+    };
+
+    public string PageSubtitle => CurrentPage switch
+    {
+        Page.Cockpit => "Alles auf einen Blick",
+        Page.Programs => "Wähle pro Programm, über welche Verbindung es ins Internet geht",
+        Page.Automatik => "Programme bekommen automatisch eine eigene Verbindung",
+        Page.Tunnels => $"{Tunnels.Count} WireGuard-Verbindungen · {ConnectedCount} verbunden",
+        Page.Stats => "Ausfälle, Wechsel und Datenmenge",
+        _ => "Verhalten von Ratio VPN",
+    };
+
+    private void UpdateShellStatus(int connected)
+    {
+        ConnectedCount = connected;
+        var instances = AutoPilot.Instances;
+        int onTunnel = instances.Count(i => i.TunnelId is { Length: > 1 } id && Controller.GetTunnel(id) != null);
+        int blocked = instances.Count(i => i.TunnelId == RatioVPN.Core.Routing.RoutingEngine.BlockRule);
+        int failing = instances.Count(i => i.TunnelId is { Length: > 1 } id && AutoPilot.IsFailed(id));
+        ProtectedCount = onTunnel + Controller.Settings.Rules.Count;
+        int reserves = Controller.Tunnels.Count(t => AutoPilot.IsReady(t.Id) && instances.All(i => i.TunnelId != t.Id)
+                                                       && Controller.Settings.Rules.All(r => r.TunnelId != t.Id));
+        bool connecting = Controller.Tunnels.Any(t => Controller.IsEnabled(t.Id) && t.State == TunnelState.Connecting);
+
+        (StatusTitle, StatusBrush, StatusSoftBrush) =
+            Tunnels.Count == 0 ? ("Einrichten", Palette.Gray, Palette.GraySoft)
+            : AutoPilot.InternetDown ? ("Internet weg", Palette.Red, Palette.RedSoft)
+            : blocked + failing > 0 ? ("Achtung", Palette.Amber, Palette.AmberSoft)
+            : ProtectedCount > 0 ? ("Geschützt", Palette.Green, Palette.GreenSoft)
+            : ("Bereit", Palette.Accent, Palette.AccentSoft);
+        StatusPulsing = connecting || blocked > 0;
+        StatusSubtitle = Tunnels.Count == 0
+            ? "Importiere eine WireGuard-Datei"
+            : $"{ProtectedCount} geschützt · {reserves} {(reserves == 1 ? "Reserve" : "Reserven")} bereit";
+        Raise(nameof(PageSubtitle));
     }
 
     public void Stop()
     {
         _fastTimer.Stop();
-        _autoTimer.Stop();
+        _scanTimer.Stop();
         _discord.Dispose();
-        _windowTimer.Stop();
     }
 }
