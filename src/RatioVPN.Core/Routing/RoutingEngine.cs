@@ -179,7 +179,8 @@ public sealed class RoutingEngine : IDisposable
 
         if (!tunnel.IsRunning)
         {
-            ThreadPool.QueueUserWorkItem(_ => { try { tunnel.Start(); } catch { } });
+            // Statisches Lambda mit Zustand: ein gefangenes "tunnel" würde bei JEDEM Aufruf eine Closure anlegen.
+            ThreadPool.QueueUserWorkItem(static t => { try { t.Start(); } catch { } }, tunnel, preferLocal: false);
         }
 
         var cfg = tunnel.Config;

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
@@ -25,6 +26,8 @@ public sealed class WgTunnel : IDisposable
     public TunnelState State { get; private set; } = TunnelState.Stopped;
     public string? LastError { get; private set; }
     public DateTime? LastHandshake { get; private set; }
+    /// <summary>Laufzeit des letzten Handshakes (Initiation → Antwort), als Latenz-Anzeige.</summary>
+    public TimeSpan? LastHandshakeRtt { get; private set; }
     public IPEndPoint? ResolvedEndpoint { get; private set; }
     public long RxBytes => Interlocked.Read(ref _rx);
     public long TxBytes => Interlocked.Read(ref _tx);
@@ -42,6 +45,8 @@ public sealed class WgTunnel : IDisposable
     private const int MaxQueue = 1024;
 
     private Socket? _socket;
+    /// <summary>Serveradresse einmal serialisiert: Senden ohne Allokation pro Paket.</summary>
+    private SocketAddress? _serverAddress;
     private Thread? _rxThread;
     private Timer? _timer;
     private CancellationTokenSource? _cts;
@@ -93,6 +98,7 @@ public sealed class WgTunnel : IDisposable
             s.ReceiveBufferSize = 4 * 1024 * 1024;
             s.SendBufferSize = 4 * 1024 * 1024;
             s.Bind(new IPEndPoint(ResolvedEndpoint.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
+            _serverAddress = ResolvedEndpoint.Serialize();
             _socket = s;
             _cts = new CancellationTokenSource();
             _rxThread = new Thread(ReceiveLoop) { IsBackground = true, Name = $"wg-rx-{Name}" };
@@ -192,25 +198,29 @@ public sealed class WgTunnel : IDisposable
     private bool SendWithKeypair(Keypair kp, ReadOnlySpan<byte> ipPacket)
     {
         var sock = _socket;
-        var ep = ResolvedEndpoint;
-        if (sock == null || ep == null) return false;
+        var server = _serverAddress;
+        if (sock == null || server == null) return false;
         var counter = kp.NextCounter();
         if (counter == null) return false;
 
         int padded = ipPacket.Length == 0 ? 0 : (ipPacket.Length + 15) & ~15;
-        var buf = new byte[WgMsg.TransportHeaderSize + padded + Crypto.Aead.TagSize];
-        buf[0] = WgMsg.Transport;
-        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(4), kp.RemoteIndex);
-        BinaryPrimitives.WriteUInt64LittleEndian(buf.AsSpan(8), counter.Value);
-
-        Span<byte> plain = padded <= 2048 ? stackalloc byte[padded] : new byte[padded];
-        plain.Clear();
-        ipPacket.CopyTo(plain);
-        kp.Send.Seal(counter.Value, plain, buf.AsSpan(WgMsg.TransportHeaderSize), ReadOnlySpan<byte>.Empty);
+        int total = WgMsg.TransportHeaderSize + padded + Crypto.Aead.TagSize;
+        var rented = ArrayPool<byte>.Shared.Rent(total);
         try
         {
-            sock.SendTo(buf, ep);
-            Interlocked.Add(ref _tx, buf.Length);
+            var msg = rented.AsSpan(0, total);
+            msg[0] = WgMsg.Transport;
+            msg[1] = msg[2] = msg[3] = 0; // reserviert (gemieteter Puffer ist nicht leer)
+            BinaryPrimitives.WriteUInt32LittleEndian(msg[4..], kp.RemoteIndex);
+            BinaryPrimitives.WriteUInt64LittleEndian(msg[8..], counter.Value);
+
+            Span<byte> plain = padded <= 2048 ? stackalloc byte[padded] : new byte[padded];
+            plain.Clear();
+            ipPacket.CopyTo(plain);
+            kp.Send.Seal(counter.Value, plain, msg[WgMsg.TransportHeaderSize..], ReadOnlySpan<byte>.Empty);
+
+            sock.SendTo(msg, SocketFlags.None, server);
+            Interlocked.Add(ref _tx, total);
             _lastSent = DateTime.UtcNow;
             if (ipPacket.Length > 0) _lastDataSent = _lastSent;
             return true;
@@ -218,6 +228,10 @@ public sealed class WgTunnel : IDisposable
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
         {
             return false;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
         }
     }
 
@@ -380,7 +394,10 @@ public sealed class WgTunnel : IDisposable
         var buf = new byte[65536];
         var plain = new byte[65536];
         var token = _cts!.Token;
-        EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+        var initial = _socket;
+        if (initial == null) return;
+        var from = new SocketAddress(initial.AddressFamily); // wiederverwendet: kein EndPoint pro Paket
+        int fromCapacity = from.Size;
         while (!token.IsCancellationRequested)
         {
             int n;
@@ -388,15 +405,15 @@ public sealed class WgTunnel : IDisposable
             if (sock == null) break;
             try
             {
-                from = new IPEndPoint(sock.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
-                n = sock.ReceiveFrom(buf, ref from);
+                from.Size = fromCapacity;
+                n = sock.ReceiveFrom(buf, SocketFlags.None, from);
             }
             catch (SocketException) { if (token.IsCancellationRequested) break; continue; }
             catch (ObjectDisposedException) { break; }
 
             if (n < 4) continue;
-            var ep = ResolvedEndpoint;
-            if (ep != null && from is IPEndPoint fep && !fep.Address.Equals(ep.Address)) continue; // nur unser Server
+            var server = _serverAddress;
+            if (server != null && !SameHost(from, server)) continue; // nur unser Server (Port egal)
 
             try
             {
@@ -420,6 +437,17 @@ public sealed class WgTunnel : IDisposable
         }
     }
 
+    /// <summary>Vergleicht nur die IP-Adresse zweier Socket-Adressen (Port und Scope egal).</summary>
+    private static bool SameHost(SocketAddress a, SocketAddress b)
+    {
+        if (a.Family != b.Family) return false;
+        var x = a.Buffer.Span;
+        var y = b.Buffer.Span;
+        return a.Family == AddressFamily.InterNetwork
+            ? x.Slice(4, 4).SequenceEqual(y.Slice(4, 4))
+            : x.Slice(8, 16).SequenceEqual(y.Slice(8, 16));
+    }
+
     private void HandleResponse(ReadOnlySpan<byte> msg)
     {
         Keypair? kp;
@@ -435,6 +463,7 @@ public sealed class WgTunnel : IDisposable
             if (old != null && old != _previous && _keypairs.TryRemove(old.LocalIndex, out var o)) o.Dispose();
             _handshakeInProgress = false;
             LastHandshake = DateTime.UtcNow;
+            LastHandshakeRtt = LastHandshake - _lastInitiationSent;
             _lastReceived = DateTime.UtcNow;
             Interlocked.Add(ref _rx, msg.Length);
             SetState(TunnelState.Connected, null);

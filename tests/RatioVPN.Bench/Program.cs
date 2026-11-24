@@ -32,6 +32,10 @@ uint lan = Ip("192.168.1.50"), remote = Ip("93.184.216.34");
     lookup.Ports[(IpProto.Tcp, 50100)] = 7001;
     var pkt = BuildTcp(lan, remote, 50100, 443, 1, 1, TcpFlags.Ack, new byte[1200]);
     Measure("pass", 2_000_000, () => engine.HandleOutbound(pkt, 1, 0));
+    Measure("parse-only", 2_000_000, () => IpPacket.TryParse(pkt, out _));
+    var empty = new RoutingEngine(lookup, new NullInjector());
+    Measure("pass-norules", 2_000_000, () => empty.HandleOutbound(pkt, 1, 0));
+    empty.Dispose();
     engine.Dispose();
 }
 

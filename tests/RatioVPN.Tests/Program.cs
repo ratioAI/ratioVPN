@@ -363,6 +363,72 @@ Console.WriteLine("Verkehr pro Prozess und Eingang ohne Kopie:");
     engine.Dispose();
 }
 
+// ---------------------------------------------------------------- WireGuard-Transport (lokaler Testserver)
+Console.WriteLine("WireGuard-Transport gegen lokalen Testserver:");
+{
+    using var server = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+    server.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+    server.ReceiveTimeout = 3000;
+    int serverPort = ((System.Net.IPEndPoint)server.LocalEndPoint!).Port;
+    var conf = TestConf().Replace("Endpoint = 127.0.0.1:9", $"Endpoint = 127.0.0.1:{serverPort}");
+    var t = new WgTunnel("lo", "LO", WgConfig.Parse(conf));
+    var k1 = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+    var k2 = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+    t.Start();
+    t.InstallKeypairForTest(new Keypair { LocalIndex = 11, RemoteIndex = 22, Send = new Aead(k1), Recv = new Aead(k2) });
+
+    var ipPkt = BuildUdp(Ip("10.2.0.2"), Ip("9.9.9.9"), 40000, 53, new byte[32]); // 60 Byte
+    byte[]? opened = null; uint receiver = 0; int plainLen = 0;
+    var rx = new byte[2048];
+    System.Net.EndPoint any = new System.Net.IPEndPoint(System.Net.IPAddress.Any, 0);
+    t.SendPacket(ipPkt);
+    for (int i = 0; i < 5 && opened == null; i++)
+    {
+        int n;
+        try { n = server.ReceiveFrom(rx, ref any); } catch (System.Net.Sockets.SocketException) { break; }
+        if (rx[0] != WgMsg.Transport) continue; // Handshake-Initiation vom Start überspringen
+        receiver = BinaryPrimitives.ReadUInt32LittleEndian(rx.AsSpan(4));
+        ulong counter = BinaryPrimitives.ReadUInt64LittleEndian(rx.AsSpan(8));
+        var plain = new byte[n - 16 - 16];
+        plainLen = plain.Length;
+        if (new Aead(k1).Open(counter, rx.AsSpan(16, n - 16), plain, ReadOnlySpan<byte>.Empty)) opened = plain;
+    }
+    Check("Tunnel-Paket kommt verschlüsselt beim Server an und lässt sich entschlüsseln",
+        opened != null && receiver == 22 && plainLen == 64 && opened.AsSpan(0, ipPkt.Length).SequenceEqual(ipPkt));
+
+    // Rückweg: Server schickt ein verschlüsseltes Paket an den Tunnel
+    var got = new BlockingCollection<byte[]>();
+    t.PacketReceived += (_, b, len) => got.Add(b[..len]);
+    byte[] Transport(ulong counter, byte[] payload)
+    {
+        int padded = (payload.Length + 15) & ~15;
+        var plain = new byte[padded];
+        payload.CopyTo(plain, 0);
+        var msg = new byte[16 + padded + 16];
+        msg[0] = WgMsg.Transport;
+        BinaryPrimitives.WriteUInt32LittleEndian(msg.AsSpan(4), 11);
+        BinaryPrimitives.WriteUInt64LittleEndian(msg.AsSpan(8), counter);
+        new Aead(k2).Seal(counter, plain, msg.AsSpan(16), ReadOnlySpan<byte>.Empty);
+        return msg;
+    }
+    var tunnelEp = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, t.LocalUdpPort);
+    var answer = BuildUdp(Ip("9.9.9.9"), Ip("10.2.0.2"), 53, 40000, new byte[20]);
+    server.SendTo(Transport(0, answer), tunnelEp);
+    Check("Antwort vom Server wird entschlüsselt weitergegeben", got.TryTake(out var back, 2000) && back.SequenceEqual(answer));
+
+    using var stranger = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+    bool strangerBound = true;
+    try { stranger.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Parse("127.0.0.2"), 0)); } catch { strangerBound = false; }
+    if (strangerBound)
+    {
+        stranger.SendTo(Transport(1, answer), tunnelEp);
+        Check("Pakete von fremder Adresse werden ignoriert", !got.TryTake(out _, 700));
+    }
+    server.SendTo(Transport(2, answer), tunnelEp);
+    Check("Danach kommen Server-Pakete weiter an", got.TryTake(out _, 2000));
+    t.Stop();
+}
+
 // ---------------------------------------------------------------- Umleitung nur bei Bedarf
 Console.WriteLine("Paketumleitung nur, wenn Regeln existieren:");
 {
