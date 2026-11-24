@@ -834,6 +834,68 @@ Console.WriteLine("Autostart-Aufgabe (Aufgabenplanung):");
     Check("Kaputtes XML → null", RatioVPN.Core.Windows.TaskXml.CommandPath("<Task><Actions>") == null && RatioVPN.Core.Windows.TaskXml.CommandPath("") == null);
 }
 
+// ---------------------------------------------------------------- Statistik
+Console.WriteLine("Statistik (Ereignisse, Rückblick aus dem Protokoll):");
+{
+    var dir = Path.Combine(Path.GetTempPath(), "ratiovpn-test-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(dir);
+    var logPath = Path.Combine(dir, "fehler.log");
+    File.WriteAllLines(logPath, new[]
+    {
+        "[2026-10-19 14:20:06] Automatik: Verbindung wg-DE-792 ist wieder da (jetzt Reserve)",
+        "[2026-10-19 21:03:40] Automatik: Minecraft* 26.2 (Prozess 47340): neu erkannt → ratioAI1-DE-571",
+        "[2026-10-20 03:37:58] Automatik: Verbindung wg-DE-671 antwortet nicht mehr",
+        "[2026-10-20 03:37:58] Automatik: Minecraft* 26.2 | NRC 26.2 (Prozess 9120): wg-DE-671 ausgefallen → gewechselt auf wg-DE-792",
+        "[2026-10-20 05:00:00] System.InvalidOperationException: kein Automatik-Eintrag",
+        "[2026-10-22 12:08:12] Automatik: Minecraft* 26.2 (Prozess 47340): keine freie Verbindung – blockiert, bis eine frei wird",
+    });
+    var now = new DateTime(2026, 11, 24, 18, 0, 0);
+    var store = new RatioVPN.Core.Stats.StatsStore(Path.Combine(dir, "statistik.jsonl"), () => now);
+    int imported = RatioVPN.Core.Stats.LogBackfill.Import(logPath, store);
+    var ev = store.Events;
+    Check("Protokoll-Rückblick liest Ausfälle, Wechsel, Erkennungen",
+        imported == 5 && ev.Count == 5
+        && ev.Select(e => e.Kind).SequenceEqual(new[] { AutoPilotEventKind.TunnelUp, AutoPilotEventKind.Assigned, AutoPilotEventKind.TunnelDown, AutoPilotEventKind.Switched, AutoPilotEventKind.Blocked })
+        && ev[0].TunnelName == "wg-DE-792" && ev[0].Time == new DateTime(2026, 10, 19, 14, 20, 6)
+        && ev[1].TunnelName == "ratioAI1-DE-571" && ev[1].Title == "Minecraft* 26.2"
+        && ev[2].TunnelName == "wg-DE-671" && ev[3].TunnelName == "wg-DE-792" && ev[3].Title == "Minecraft* 26.2 | NRC 26.2",
+        string.Join(" | ", ev.Select(e => $"{e.Kind}:{e.TunnelName}:{e.Title}")));
+
+    void Down(string tunnel, DateTime t) => store.Add(new RatioVPN.Core.Stats.StatEvent(t, AutoPilotEventKind.TunnelDown, tunnel, null, "x"));
+    Down("wg-DE-1", new DateTime(2026, 11, 22, 10, 0, 0));
+    Down("wg-DE-1", new DateTime(2026, 11, 22, 23, 0, 0));
+    Down("wg-DE-2", new DateTime(2026, 11, 24, 1, 0, 0));
+    var perDay = store.FailuresPerDay(5);
+    Check("Ausfälle pro Tag sind lückenlos",
+        perDay.Select(d => d.Count).SequenceEqual(new[] { 0, 0, 2, 0, 1 }) && perDay[0].Day == new DateOnly(2026, 11, 20) && perDay[^1].Day == new DateOnly(2026, 11, 24),
+        string.Join(",", perDay.Select(d => $"{d.Day}:{d.Count}")));
+    var rank = store.FailuresPerTunnel(TimeSpan.FromDays(7));
+    Check("Ranking der Verbindungen", rank.Count == 2 && rank[0] == ("wg-DE-1", 2) && rank[1] == ("wg-DE-2", 1));
+    Check("Ereignisse eines Zeitraums werden gezählt",
+        store.Count(AutoPilotEventKind.TunnelDown, TimeSpan.FromDays(7)) == 3 && store.RecentFailures(TimeSpan.FromHours(24)).Single().TunnelName == "wg-DE-2");
+    store.Add(new RatioVPN.Core.Stats.TrafficSample(new DateTime(2026, 11, 23, 8, 0, 0), "wg-DE-1", 1000, 500));
+    store.Add(new RatioVPN.Core.Stats.TrafficSample(new DateTime(2026, 11, 23, 9, 0, 0), "wg-DE-2", 200, 300));
+    var traffic = store.TrafficPerDay(2);
+    Check("Datenmenge pro Tag", traffic.Count == 2 && traffic[0] == (new DateOnly(2026, 11, 23), 2000L) && traffic[1].Bytes == 0);
+
+    var again = new RatioVPN.Core.Stats.StatsStore(store.FilePath, () => now);
+    Check("Statistik übersteht einen Neustart", again.Events.Count == 8 && again.TrafficPerDay(2)[0].Bytes == 2000);
+    File.AppendAllText(store.FilePath, "{kaputt\n\n");
+    store.Add(new RatioVPN.Core.Stats.StatEvent(now, AutoPilotEventKind.Kicked, "wg-DE-1", "MC", "gekickt"));
+    var reread = new RatioVPN.Core.Stats.StatsStore(store.FilePath, () => now);
+    Check("Kaputte Zeile wird übersprungen", reread.Events.Count == 9 && reread.Count(AutoPilotEventKind.Kicked, TimeSpan.FromDays(1)) == 1);
+
+    var big = new string('x', 1000);
+    for (int i = 0; i < 5600; i++)
+        store.Add(new RatioVPN.Core.Stats.StatEvent(now.AddDays(-200), AutoPilotEventKind.Info, null, null, big));
+    var len = new FileInfo(store.FilePath).Length;
+    Check("Datei über 5 MB wird auf 90 Tage gekürzt",
+        len < 5 * 1024 * 1024 && store.Events.All(e => e.Time >= now.AddDays(-90) || e.Kind == AutoPilotEventKind.Info)
+        && store.Count(AutoPilotEventKind.Kicked, TimeSpan.FromDays(1)) == 1 && store.Events.Count(e => e.Kind == AutoPilotEventKind.Info) < 5600,
+        $"{len}");
+    try { Directory.Delete(dir, true); } catch { }
+}
+
 static Process StartSleeper()
 {
     var exe = Environment.ProcessPath!;
